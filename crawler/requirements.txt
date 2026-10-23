@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+sqlalchemy>=2
+psycopg[binary]
+redis
+requests
+beautifulsoup4
+pydantic>=2
+pyyaml
+playwright
+anthropic

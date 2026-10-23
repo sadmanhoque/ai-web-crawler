@@ -1,0 +1,40 @@
+# Indexer: CPU/GPU-bound embedding workers. Scales independently, driven by stream backlog.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: localmind-indexer}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: localmind-indexer}}
+  template:
+    metadata: {labels: {app: localmind-indexer}}
+    spec:
+      containers:
+        - name: indexer
+          image: registry.example.com/localmind-indexer:latest
+          env:
+            - {name: PROFILES_FILE, value: /config/profiles.yaml}
+            - {name: REDIS_URL, value: "redis://redis:6379/0"}
+            - {name: QDRANT_URL, value: "http://qdrant:6333"}
+          livenessProbe: {httpGet: {path: /, port: 8080}, initialDelaySeconds: 120}
+          resources:
+            requests: {cpu: "2", memory: 3Gi}
+            limits: {memory: 6Gi}
+          volumeMounts: [{name: config, mountPath: /config}]
+      volumes: [{name: config, configMap: {name: localmind-config}}]
+---
+# Requires KEDA. Scales on undelivered events in the consumer group (check lagCount support
+# in your KEDA version; pendingEntriesCount is the older alternative).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: localmind-indexer}
+spec:
+  scaleTargetRef: {name: localmind-indexer}
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  triggers:
+    - type: redis-streams
+      metadata:
+        address: redis:6379
+        stream: index:events
+        consumerGroup: indexers
+        lagCount: "200"

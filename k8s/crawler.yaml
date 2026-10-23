@@ -1,0 +1,69 @@
+# Crawler / planner: API + scheduler workers. Safe to run N replicas (FOR UPDATE SKIP LOCKED).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: localmind-crawler}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: localmind-crawler}}
+  template:
+    metadata: {labels: {app: localmind-crawler}}
+    spec:
+      containers:
+        - name: crawler
+          image: registry.example.com/localmind-crawler:latest
+          ports: [{containerPort: 8000}]
+          env:
+            - {name: PROFILES_FILE, value: /config/profiles.yaml}
+            - {name: SITES_FILE, value: /config/sites.yaml}
+            - {name: CRAWL_WORKERS, value: "2"}
+            - {name: REDIS_URL, value: "redis://redis:6379/0"}
+            - name: DATABASE_URL        # postgresql+psycopg://user:pass@host/db
+              valueFrom: {secretKeyRef: {name: localmind-secrets, key: database-url}}
+            - name: ADMIN_TOKEN
+              valueFrom: {secretKeyRef: {name: localmind-secrets, key: admin-token}}
+            - name: CLOUDFLARE_API_TOKEN
+              valueFrom: {secretKeyRef: {name: localmind-secrets, key: cloudflare-token}}
+            - name: ANTHROPIC_API_KEY
+              valueFrom: {secretKeyRef: {name: localmind-secrets, key: anthropic-key}}
+          readinessProbe: {httpGet: {path: /healthz, port: 8000}}
+          livenessProbe: {httpGet: {path: /healthz, port: 8000}, initialDelaySeconds: 20}
+          resources:
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {memory: 2Gi}
+          volumeMounts: [{name: config, mountPath: /config}]
+      volumes: [{name: config, configMap: {name: localmind-config}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: localmind-crawler}
+spec:
+  selector: {app: localmind-crawler}
+  ports: [{port: 80, targetPort: 8000}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: localmind-crawler}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: localmind-crawler}
+  minReplicas: 1
+  maxReplicas: 8
+  metrics: [{type: Resource, resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}}]
+---
+# Daily Cloudflare Radar discovery
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: localmind-radar-sync}
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: curl
+              image: curlimages/curl
+              env:
+                - name: ADMIN_TOKEN
+                  valueFrom: {secretKeyRef: {name: localmind-secrets, key: admin-token}}
+              command: ["sh", "-c", "curl -fsS -X POST -H \"Authorization: Bearer $ADMIN_TOKEN\" http://localmind-crawler/admin/sync-radar"]

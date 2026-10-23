@@ -1,0 +1,33 @@
+# A profile = a "category" of website = the ideal indexing/embedding config for it.
+# Sites in the same profile share the profile's default collection unless the site
+# has a collection_override. Profiles that share a collection MUST share the same
+# embedding model + vector size (validated at startup).
+profiles:
+  general:
+    description: Fallback for uncategorised sites
+    collection: general
+    embedding_model: BAAI/bge-base-en-v1.5
+    vector_size: 768
+    chunk_size: 1000
+    chunk_overlap: 150
+  docs:
+    description: Technical documentation (AWS, Kubernetes, library docs)
+    collection: docs
+    embedding_model: BAAI/bge-base-en-v1.5
+    vector_size: 768
+    chunk_size: 1500
+    chunk_overlap: 300
+  encyclopedia:
+    description: Encyclopedic articles (Wikipedia and similar)
+    collection: encyclopedia
+    embedding_model: BAAI/bge-base-en-v1.5
+    vector_size: 768
+    chunk_size: 800
+    chunk_overlap: 100
+  news:
+    description: News and fast-changing content
+    collection: news
+    embedding_model: BAAI/bge-small-en-v1.5
+    vector_size: 384
+    chunk_size: 600
+    chunk_overlap: 80

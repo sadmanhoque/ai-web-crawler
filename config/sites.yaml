@@ -1,0 +1,28 @@
+# Manual sites. Fields given here WIN over auto decisions and are re-applied on
+# startup / POST /admin/sync-manual. Omit a field to leave it to the planner.
+sites:
+  - domain: docs.aws.amazon.com
+    start_url: https://docs.aws.amazon.com/
+    profile: docs
+    depth_override: full          # always index everything
+    max_pages: 5000
+    render_js: true
+    run_hour_utc: 19
+    run_minute_utc: 0
+  - domain: en.wikipedia.org
+    start_url: https://en.wikipedia.org/wiki/Main_Page
+    profile: encyclopedia
+    max_pages: 2000
+    path_rules:
+      - {prefix: /wiki/Special, depth: headline}
+    run_hour_utc: 15
+    run_minute_utc: 0
+
+# Cloudflare Radar discovery (POST /admin/sync-radar, run daily by a CronJob)
+radar:
+  limit: 100
+  default_profile: general
+  max_pages: 200
+  categories: []                  # e.g. [{name: Technology, domainCategory: Technology, profile: docs}]
+  denylist: [google.com, facebook.com, youtube.com, instagram.com, tiktok.com,
+             microsoft.com, apple.com, amazon.com, netflix.com, x.com, twitter.com]

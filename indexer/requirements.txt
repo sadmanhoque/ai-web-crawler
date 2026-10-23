@@ -1,0 +1,6 @@
+redis
+qdrant-client
+sentence-transformers
+langchain-text-splitters
+pydantic>=2
+pyyaml
