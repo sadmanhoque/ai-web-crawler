@@ -1,7 +1,10 @@
 # Crawler / planner: API + scheduler workers. Safe to run N replicas (FOR UPDATE SKIP LOCKED).
+# Runs in the localmind namespace alongside the ai-web-search app, and shares
+# that repo's CNPG Postgres cluster (localmind-pg) — in its OWN database
+# (localmind_crawler), created by ai-web-search/k8s-manifests/pg-crawler.yaml.
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: localmind-crawler}
+metadata: {name: localmind-crawler, namespace: localmind}
 spec:
   replicas: 2
   selector: {matchLabels: {app: localmind-crawler}}
@@ -17,8 +20,11 @@ spec:
             - {name: SITES_FILE, value: /config/sites.yaml}
             - {name: CRAWL_WORKERS, value: "2"}
             - {name: REDIS_URL, value: "redis://redis:6379/0"}
-            - name: DATABASE_URL        # postgresql+psycopg://user:pass@host/db
-              valueFrom: {secretKeyRef: {name: localmind-secrets, key: database-url}}
+            # Own database in the shared localmind-pg cluster. The Secret is
+            # defined by the ai-web-search repo (k8s-manifests/secrets.*.yaml);
+            # its pg-crawler.yaml Job creates the role + database it points at.
+            - name: DATABASE_URL        # postgresql+psycopg://localmind_crawler:***@localmind-pg-rw.../localmind_crawler
+              valueFrom: {secretKeyRef: {name: localmind-crawler-pg, key: database-url}}
             - name: ADMIN_TOKEN
               valueFrom: {secretKeyRef: {name: localmind-secrets, key: admin-token}}
             - name: CLOUDFLARE_API_TOKEN
@@ -35,14 +41,14 @@ spec:
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: localmind-crawler}
+metadata: {name: localmind-crawler, namespace: localmind}
 spec:
   selector: {app: localmind-crawler}
   ports: [{port: 80, targetPort: 8000}]
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
-metadata: {name: localmind-crawler}
+metadata: {name: localmind-crawler, namespace: localmind}
 spec:
   scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: localmind-crawler}
   minReplicas: 1
@@ -52,7 +58,7 @@ spec:
 # Daily Cloudflare Radar discovery
 apiVersion: batch/v1
 kind: CronJob
-metadata: {name: localmind-radar-sync}
+metadata: {name: localmind-radar-sync, namespace: localmind}
 spec:
   schedule: "0 2 * * *"
   jobTemplate:

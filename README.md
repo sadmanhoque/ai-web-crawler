@@ -41,6 +41,13 @@ sites not pinned in the yaml, or edit the yaml + `/admin/sync-manual`.
 - robots.txt is respected. Radar sites are crawled with a small page cap (default 200).
 
 ## Run
+Shared-infra prerequisites (all in the `localmind` namespace, deployed by the
+ai-web-search repo): the `localmind-pg` CNPG cluster is Ready, the
+`localmind-crawler-pg` Secret is applied, and the `pg-crawler-db-init` Job has
+completed — that Job creates role + database `localmind_crawler` in the shared
+cluster, which is the crawler's only Postgres footprint:
+    kubectl -n localmind get job pg-crawler-db-init
+
 ```
 docker build -f crawler/Dockerfile -t localmind-crawler .
 docker build -f indexer/Dockerfile -t localmind-indexer .
