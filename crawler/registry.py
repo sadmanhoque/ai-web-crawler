@@ -38,7 +38,10 @@ def upsert_site(s: Session, domain: str, *, create: dict | None = None, update: 
     update = update or {}
     site = s.execute(select(Site).where(Site.domain == domain)).scalar_one_or_none()
     if site is None:
-        fields = {"start_url": f"https://{domain}/", **(create or {}), **update}
+        # interval_hours defaults to 24 at INSERT time; seed it so compute_next
+        # works before flush (a fresh instance has None until the DB fills it).
+        fields = {"start_url": f"https://{domain}/", "interval_hours": 24,
+                  **(create or {}), **update}
         site = Site(domain=domain, **fields)
         if "run_hour_utc" not in fields:
             site.run_hour_utc, site.run_minute_utc = assign_slot(s, domain)

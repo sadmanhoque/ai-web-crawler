@@ -10,7 +10,7 @@ from shared.config import load_profiles
 from shared.extract import extract_headline, extract_sections
 from shared.messages import CloseMsg, Depth, PageMsg, Section, get_redis, publish
 from . import policy
-from .db import PageStat, SessionLocal, Site, utcnow
+from .db import PageStat, Partner, SessionLocal, Site, utcnow
 from .fetch import SiteCrawler
 from .registry import compute_next
 from .summarize import summarize
@@ -22,7 +22,10 @@ LEASE = timedelta(hours=2)      # if a pod dies mid-crawl, the site is retried a
 def claim_due() -> Site | None:
     with SessionLocal() as s:
         now = utcnow()
-        site = s.execute(select(Site).where(Site.enabled, Site.next_run_at <= now)
+        partner_ids = select(Partner.site_id).where(
+            Partner.enabled.is_(True), Partner.site_id.isnot(None))
+        site = s.execute(select(Site).where(Site.enabled, Site.next_run_at <= now,
+                                            ~Site.id.in_(partner_ids))       # partners are fed by the feed watcher
                          .order_by(Site.next_run_at).limit(1).with_for_update(skip_locked=True)
                          ).scalar_one_or_none()
         if site:

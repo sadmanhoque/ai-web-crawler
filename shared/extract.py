@@ -1,7 +1,10 @@
 """HTML -> sections. Ported from ingest.py (hidden-text filter kept).
 Fix vs. the original: <title>/meta are read BEFORE <head> is decomposed
 (the original removed <head> first, so page_title always fell back to the URL)."""
+import json
 import re
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from bs4 import BeautifulSoup
 from .messages import Section
 
@@ -89,9 +92,58 @@ def extract_headline(soup: BeautifulSoup) -> tuple[str, str]:
     return title or h1, text
 
 
+def extract_published(soup: BeautifulSoup) -> datetime | None:
+    """Best-effort publication date: meta tags, then JSON-LD, then <time datetime>.
+    Call BEFORE extract_sections (which decomposes <head>/scripts). None => unknown."""
+    for tag in soup.find_all("meta"):
+        key = (tag.get("property") or tag.get("name") or "").lower()
+        if key in ("article:published_time", "og:article:published_time", "pubdate",
+                   "publishdate", "parsely-pub-date", "dc.date", "dc.date.issued"):
+            dt = parse_dt(str(tag.get("content") or ""))
+            if dt:
+                return dt
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            data = data.get("@graph", [data])
+        for node in data if isinstance(data, list) else [data]:
+            if isinstance(node, dict) and node.get("datePublished"):
+                dt = parse_dt(str(node["datePublished"]))
+                if dt:
+                    return dt
+    t = soup.find("time", attrs={"datetime": True})
+    return parse_dt(str(t["datetime"])) if t else None
+
+
+def parse_dt(v: str) -> datetime | None:
+    """ISO 8601 or RFC 822 -> aware datetime (naive assumed UTC), else None."""
+    v = (v or "").strip()
+    if not v:
+        return None
+    try:
+        dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = parsedate_to_datetime(v)
+        except (TypeError, ValueError):
+            return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 def extract_sections(soup: BeautifulSoup) -> list[Section]:
-    for tag in soup(["script", "style", "nav", "footer", "head", "aside", "noscript"]):
-        tag.decompose()
+    head, body = soup.find("head"), soup.find("body")
+    if head is not None and body is not None and body.find_parent("head") is head:
+        # Missing </head>: html.parser nested <body> inside <head> (browsers
+        # close it implicitly, this parser does not). Decomposing head would
+        # drop the whole article, so strip only the actual head elements.
+        for el in head.find_all(["title", "meta", "script", "style", "link"]):
+            el.decompose()
+    else:
+        for tag in soup(["script", "style", "nav", "footer", "head", "aside", "noscript"]):
+            tag.decompose()
     rules = build_css_rules(soup)
     sections, buf = [], []
     heading, htag = "Introduction", "h1"

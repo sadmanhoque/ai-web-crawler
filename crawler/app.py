@@ -8,6 +8,7 @@ from sqlalchemy import select
 from shared.config import load_profiles
 from shared.messages import Depth, MoveMsg, get_redis, publish
 from .db import PageStat, SessionLocal, Site, init_db, utcnow
+from .feedwatcher import feed_worker_loop
 from .radar import sync_radar
 from .registry import sync_manual, upsert_site
 from .scheduler import worker_loop
@@ -15,6 +16,7 @@ from .scheduler import worker_loop
 logging.basicConfig(level=logging.INFO)
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 WORKERS = int(os.getenv("CRAWL_WORKERS", "1"))
+FEED_WORKERS = int(os.getenv("FEED_WORKERS", "1"))
 stop = threading.Event()
 
 
@@ -25,6 +27,8 @@ async def lifespan(app):
         sync_manual(s)
     for _ in range(WORKERS):
         threading.Thread(target=worker_loop, args=(stop,), daemon=True).start()
+    for _ in range(FEED_WORKERS):
+        threading.Thread(target=feed_worker_loop, args=(stop,), daemon=True).start()
     yield
     stop.set()
 

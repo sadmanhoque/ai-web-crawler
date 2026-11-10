@@ -89,14 +89,51 @@ Messages (`shared/messages.py`):
 
 ## Ingest gate + backfill (build order 3 + 6)
 
-New pages from partner feeds default to t0. The gate keeps "extremely old or
-uninteresting" pages out of the vector index entirely (straight to t3):
+New pages from partner feeds default to t0. The gate (`shared/gate.py`, pure
+function, checked in `tests/test_gate.py`) keeps "extremely old or
+uninteresting" pages out of the vector index entirely. Check order:
 
-- age > `partners.backfill_cutoff_days` (default 365d) — the onboarding
-  backfill uses the same gate, so a 20-year archive costs metadata, not vectors
-- thin pages (word count below floor)
-- boilerplate paths (`/tag/`, `/author/`, `/category/`, `/page/N`)
-- duplicate `content_hash` (syndicated copies)
+1. **unchanged** — `page_stats.content_hash` already matches -> skip
+   (re-crawls of unchanged pages never re-embed)
+2. **boilerplate path** — `/tag/`, `/author/`, `/category/`, `/page/N`,
+   `/search`, ... -> skip (substring heuristic, see `shared/gate.BOILERPLATE`)
+3. **thin** — word count below `GATE_MIN_WORDS` (default 60) -> skip.
+   Applies to full-page crawls only; rss/api items are summaries by design,
+   so feed adapters pass `min_words=None`
+4. **age** — `published` (from `article:published_time` / JSON-LD /
+   `<time datetime>`) older than `partners.backfill_cutoff_days` (default
+   365d) -> straight to t3. Unknown publication date is treated as fresh
+   (index now, archive later via heat)
+5. **duplicate** — another URL (indexed or archived) already holds this
+   exact content_hash (syndicated copies) -> skip
+
+The onboarding backfill (step 6) uses the same gate, so a 20-year archive
+costs metadata, not vectors.
+
+## Feed watcher (build order 3)
+
+`crawler/feedwatcher.py` runs as `FEED_WORKERS` threads in the crawler app.
+`claim_due_partner()` is the SKIP-LOCKED twin of the scheduler's
+`claim_due()`; partner-linked `sites` rows are excluded from the scheduler
+so a partner is only ever crawled by the feed watcher. Per poll:
+
+- **crawl** adapter: BFS via `SiteCrawler`, gate with the thin floor;
+  new/changed pages publish at t0 (depth full), old pages archive to t3
+- **rss** adapter: RSS 2.0 + Atom via stdlib `xml.etree` (no new deps);
+  item text = `content:encoded`/`description` (RSS) or `content`/`summary`
+  (Atom), HTML-stripped
+- **api** adapter: generic JSON feed (a list or `{"items": [...]}`) with
+  `url|link`, `title`, `published|publishedAt|pubDate`,
+  `content|summary|description`
+
+Publishing a page immediately upserts its `page_stats` row with the
+content_hash, so the next poll dedupes before the first hit ever lands.
+Archived pages are marked in `page_archives` the same way.
+
+**No CloseMsg for partner crawls, on purpose:** a `complete` crawl would
+delete points the gate intentionally left unindexed (t3 archives, boilerplate
+skips). Deletion of partner pages is the tier bot's job; points of pages a
+partner removed are reclaimed by heat decay -> demote.
 
 ## Build order
 
@@ -106,8 +143,9 @@ uninteresting" pages out of the vector index entirely (straight to t3):
 - [x] 2. Indexer: `DemoteMsg`/`PromoteMsg` handlers, `metadata.source_url`
       payload index, `metadata.tier` on all points, `shared/tiers.py` decision
       module + `tests/test_tiers.py`
-- [ ] 3. Feed watcher: per-partner poll (crawl / rss / api adapters) -> ingest
-      gate -> PageMsg(t0) or straight to t3
+- [x] 3. Feed watcher: per-partner poll (crawl / rss / api adapters) -> ingest
+      gate -> PageMsg(t0) or straight to t3 (`crawler/feedwatcher.py`,
+      `shared/gate.py`, `tests/test_gate.py`)
 - [ ] 4. Tier bot: scheduled heat evaluation, transition messages,
       page_stats updates
 - [ ] 5. tierctl CLI: monitoring/debug (spec below)

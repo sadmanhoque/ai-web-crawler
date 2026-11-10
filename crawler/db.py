@@ -77,6 +77,8 @@ class Partner(Base):
     backfill_cutoff_days: Mapped[int] = mapped_column(default=365)             # older pages skip vector indexing
     tier_config: Mapped[dict] = mapped_column(JSON, default=dict)              # TierConfig overrides
     enabled: Mapped[bool] = mapped_column(default=True)
+    last_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_status: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
