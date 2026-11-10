@@ -4,6 +4,7 @@ from typing import Annotated, Literal, Union
 import redis
 from pydantic import BaseModel, Field, TypeAdapter
 from .config import REDIS_URL, STREAM
+from .tiers import Tier
 
 
 class Depth(str, Enum):
@@ -49,7 +50,32 @@ class MoveMsg(BaseModel):
     dst: str
 
 
-Event = Annotated[Union[PageMsg, CloseMsg, MoveMsg], Field(discriminator="type")]
+class DemoteMsg(BaseModel):
+    """Tier -> t3: remove the page's vectors from Qdrant. The tier bot has
+    already written the text to page_archives before publishing this."""
+    type: Literal["demote"] = "demote"
+    site_id: int
+    collection: str
+    url: str
+    to_tier: Tier = Tier.t3
+
+
+class PromoteMsg(BaseModel):
+    """Tier up: delete the page's old points and re-index the provided
+    sections (fetched by the tier bot) at the target tier."""
+    type: Literal["promote"] = "promote"
+    site_id: int
+    domain: str
+    profile: str
+    collection: str
+    url: str
+    title: str
+    to_tier: Tier
+    sections: list[Section]
+
+
+Event = Annotated[Union[PageMsg, CloseMsg, MoveMsg, DemoteMsg, PromoteMsg],
+                  Field(discriminator="type")]
 _adapter = TypeAdapter(Event)
 
 

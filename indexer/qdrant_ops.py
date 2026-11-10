@@ -26,7 +26,8 @@ def ensure_collection(name: str, prof: Profile):
                 optimizers_config=models.OptimizersConfigDiff(indexing_threshold=20_000))
             for key, schema in (("metadata.site_id", models.PayloadSchemaType.INTEGER),
                                 ("metadata.crawl_id", models.PayloadSchemaType.KEYWORD),
-                                ("metadata.domain", models.PayloadSchemaType.KEYWORD)):
+                                ("metadata.domain", models.PayloadSchemaType.KEYWORD),
+                                ("metadata.source_url", models.PayloadSchemaType.KEYWORD)):
                 client.create_payload_index(name, key, schema)
         except Exception:
             if not client.collection_exists(name):      # lost a creation race with another replica? fine
@@ -39,6 +40,10 @@ def ensure_collection(name: str, prof: Profile):
         existing = pts[0].payload.get("metadata", {}).get("embedding_model") if pts else None
         if existing and existing != prof.embedding_model:
             raise ValueError(f"Collection '{name}' holds '{existing}' vectors, profile wants '{prof.embedding_model}'")
+        try:                                          # collections created before the source_url index
+            client.create_payload_index(name, "metadata.source_url", models.PayloadSchemaType.KEYWORD)
+        except Exception:
+            pass                                      # index already exists
     _known.add(name)
 
 
@@ -56,3 +61,15 @@ def move_site(site_id: int, prof: Profile, src: str, dst: str) -> int:
             break
     client.delete(src, points_selector=models.FilterSelector(filter=flt))
     return moved
+
+
+def delete_url_points(collection: str, url: str) -> int:
+    """Delete every point of one page (all tiers); returns how many were removed."""
+    flt = models.Filter(must=[models.FieldCondition(key="metadata.source_url",
+                                                    match=models.MatchValue(value=url))])
+    pts, _ = client.scroll(collection, scroll_filter=flt, limit=500,
+                           with_payload=False, with_vectors=False)
+    if not pts:
+        return 0
+    client.delete(collection, models.FilterSelector(filter=flt))
+    return len(pts)

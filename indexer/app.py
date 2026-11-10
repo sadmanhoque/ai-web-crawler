@@ -9,8 +9,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client import models
 from shared.config import DEAD_STREAM, GROUP, STREAM, load_profiles
-from shared.messages import CloseMsg, MoveMsg, PageMsg, get_redis, parse_event
-from .qdrant_ops import client, ensure_collection, move_site, site_filter
+from shared.messages import (CloseMsg, DemoteMsg, MoveMsg, PageMsg, PromoteMsg,
+                             get_redis, parse_event)
+from shared.tiers import TIER_TO_DEPTH, Tier, tier_for_depth
+from .qdrant_ops import client, delete_url_points, ensure_collection, move_site, site_filter
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("indexer")
@@ -27,30 +29,57 @@ def embed(model_name: str, texts: list[str]) -> list[list[float]]:
                                       show_progress_bar=False).tolist()
 
 
-def handle_page(r, m: PageMsg):
-    prof = load_profiles()[m.profile]
-    ensure_collection(m.collection, prof)
-    splitter = RecursiveCharacterTextSplitter(chunk_size=prof.chunk_size, chunk_overlap=prof.chunk_overlap)
-    now = datetime.now(timezone.utc).isoformat()
+def _index_sections(*, url, title, sections, site_id, domain, profile, collection,
+                    tier, depth_label, now, crawl_id=None):
+    prof = load_profiles()[profile]
+    ensure_collection(collection, prof)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=prof.chunk_size,
+                                              chunk_overlap=prof.chunk_overlap)
     texts, metas, ids = [], [], []
-    for si, sec in enumerate(m.sections):
+    for si, sec in enumerate(sections):
         for ci, chunk in enumerate(splitter.split_text(sec.text)):
             texts.append(chunk)
-            ids.append(str(uuid.uuid5(uuid.NAMESPACE_URL, f"{m.url}#{si}#{ci}")))   # idempotent re-index
-            metas.append({"source_url": m.url, "page_title": m.title, "section_heading": sec.heading,
-                          "heading_tag": sec.heading_tag, "preview": sec.text[:150],
-                          "site_id": m.site_id, "domain": m.domain, "profile": m.profile,
-                          "depth": m.depth.value, "crawl_id": m.crawl_id, "crawled_at": now,
-                          "embedding_model": prof.embedding_model})
+            ids.append(str(uuid.uuid5(uuid.NAMESPACE_URL, f"{url}#{si}#{ci}")))   # idempotent re-index
+            md = {"source_url": url, "page_title": title, "section_heading": sec.heading,
+                  "heading_tag": sec.heading_tag, "preview": sec.text[:150],
+                  "site_id": site_id, "domain": domain, "profile": profile,
+                  "depth": depth_label, "tier": tier.value,
+                  "crawled_at": now, "embedding_model": prof.embedding_model}
+            if crawl_id:
+                md["crawl_id"] = crawl_id
+            metas.append(md)
     for i in range(0, len(texts), BATCH):
         vecs = embed(prof.embedding_model, texts[i:i + BATCH])
-        client.upsert(m.collection, points=[
+        client.upsert(collection, points=[
             models.PointStruct(id=pid, vector=v, payload={"page_content": t, "metadata": md})
             for pid, v, t, md in zip(ids[i:i + BATCH], vecs, texts[i:i + BATCH], metas[i:i + BATCH])])
+
+
+def handle_page(r, m: PageMsg):
+    _index_sections(url=m.url, title=m.title, sections=m.sections, site_id=m.site_id,
+                    domain=m.domain, profile=m.profile, collection=m.collection,
+                    tier=tier_for_depth(m.depth.value), depth_label=m.depth.value,
+                    now=datetime.now(timezone.utc).isoformat(), crawl_id=m.crawl_id)
     key = f"crawl:{m.crawl_id}"
     r.hincrby(key, "done", 1)
     r.expire(key, 7 * 86400)
     maybe_finalize(r, m.crawl_id)
+
+
+def handle_promote(r, m: PromoteMsg):
+    if m.to_tier is Tier.t3:                    # t3 has no depth; only demote goes there
+        raise ValueError(f"invalid promote to t3 for {m.url}")
+    delete_url_points(m.collection, m.url)      # drop old tier's points first
+    _index_sections(url=m.url, title=m.title, sections=m.sections, site_id=m.site_id,
+                    domain=m.domain, profile=m.profile, collection=m.collection,
+                    tier=m.to_tier, depth_label=TIER_TO_DEPTH[m.to_tier],
+                    now=datetime.now(timezone.utc).isoformat())
+    log.info("promoted %s to %s (%d sections)", m.url, m.to_tier.value, len(m.sections))
+
+
+def handle_demote(r, m: DemoteMsg):
+    n = delete_url_points(m.collection, m.url)  # text already in page_archives
+    log.info("demoted %s to %s, removed %d points", m.url, m.to_tier.value, n)
 
 
 def handle_close(r, m: CloseMsg):
@@ -84,7 +113,8 @@ def process(r, mid: str, fields: dict):
         ev = parse_event(fields["data"])
         for attempt in range(3):
             try:
-                {"page": handle_page, "close": handle_close, "move": handle_move}[ev.type](r, ev)
+                {"page": handle_page, "close": handle_close, "move": handle_move,
+                 "promote": handle_promote, "demote": handle_demote}[ev.type](r, ev)
                 break
             except Exception:
                 if attempt == 2:

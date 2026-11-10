@@ -52,9 +52,46 @@ class PageStat(Base):
     url: Mapped[str] = mapped_column(String(2048), primary_key=True)
     site_id: Mapped[int] = mapped_column(index=True)
     hits: Mapped[int] = mapped_column(default=0)
+    impressions: Mapped[int] = mapped_column(default=0)              # appeared in a result set
+    tier: Mapped[str] = mapped_column(String(8), default="t0")       # t0|t1|t2|t3, see shared/tiers.py
+    heat: Mapped[float] = mapped_column(default=0.0)                 # last computed heat score
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_tier_change: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     content_hash: Mapped[str | None] = mapped_column(String(64))
     summary: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Partner(Base):
+    """A partner website: the only sites we index into Qdrant and pay out for.
+    Manual onboarding; see docs/tiering.md."""
+    __tablename__ = "partners"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    domain: Mapped[str] = mapped_column(String(255), unique=True)
+    profile: Mapped[str] = mapped_column(String(64), default="general")
+    collection: Mapped[str | None] = mapped_column(String(128), default=None)  # None = profile's shared collection
+    site_id: Mapped[int | None] = mapped_column(default=None)                  # link to the crawler's sites row
+    feed_type: Mapped[str] = mapped_column(String(16), default="crawl")        # crawl | rss | api
+    feed_url: Mapped[str | None] = mapped_column(String(2048))
+    poll_interval_minutes: Mapped[int] = mapped_column(default=30)
+    backfill_cutoff_days: Mapped[int] = mapped_column(default=365)             # older pages skip vector indexing
+    tier_config: Mapped[dict] = mapped_column(JSON, default=dict)              # TierConfig overrides
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PageArchive(Base):
+    """Cold text store for t3 (vault) pages: what vector search no longer
+    holds, kept for restore. Written by the tier bot before demote, and by
+    the ingest gate for pages never vectorized."""
+    __tablename__ = "page_archives"
+    url: Mapped[str] = mapped_column(String(2048), primary_key=True)
+    site_id: Mapped[int] = mapped_column(index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+    text: Mapped[str] = mapped_column(Text)
+    tier: Mapped[str] = mapped_column(String(8), default="t3")
+    archived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 def init_db():

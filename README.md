@@ -39,6 +39,7 @@ sites not pinned in the yaml, or edit the yaml + `/admin/sync-manual`.
   match the destination collection (checked).
 - Payload layout is `{"page_content", "metadata": {...}}` (LangChain-compatible). `aws_service` was dropped.
 - robots.txt is respected. Radar sites are crawled with a small page cap (default 200).
+- Partner content is tiered S3-style (t0 full -> t3 vault) by visit heat: see `docs/tiering.md`.
 
 ## Run
 Shared-infra prerequisites (all in the `localmind` namespace, deployed by the
