@@ -10,8 +10,8 @@ Usage (from anywhere; needs DATABASE_URL, crawler side):
     python3 cli/tierctl.py heat URL
     python3 cli/tierctl.py dry-run [--partner DOMAIN]
     python3 cli/tierctl.py transitions [--since 24h]
-    python3 cli/tierctl.py promote URL [--tier t0|t1|t2]   # stub, lands with build order 4
-    python3 cli/tierctl.py demote URL                       # stub, lands with build order 4
+    python3 cli/tierctl.py promote URL [--tier t0|t1|t2]   # one step up, or jump to --tier
+    python3 cli/tierctl.py demote URL                       # one step down
 """
 import argparse
 import os
@@ -167,16 +167,32 @@ def cmd_heat(args):
 
 def cmd_dry_run(args):
     PageStat, Site, Partner, PageArchive, SessionLocal = _db()
-    rows = _rows(PageStat, Site, SessionLocal, args.partner)
+    from datetime import datetime, timezone
+    from shared.tiers import Tier, TierConfig, heat, target_tier
+    now = datetime.now(timezone.utc)
+    db = SessionLocal()
+    # exactly the rows evaluate_pass sees (enabled partners only)
+    q = (db.query(PageStat, Site, Partner)
+         .join(Site, Site.id == PageStat.site_id)
+         .join(Partner, Partner.site_id == Site.id)
+         .filter(Partner.enabled))
+    if args.partner:
+        q = q.filter(Partner.domain == args.partner)
+    rows = q.all()
+    db.close()
     planned = []
-    for ps, site in rows:
-        score, target, reason = _score_and_target(PageStat, Site, Partner, SessionLocal, ps, site)
+    for ps, site, partner in rows:
+        cfg = TierConfig(**(partner.tier_config or {}))
+        score = heat(ps.hits, ps.impressions, ps.last_accessed_at,
+                     cfg.half_life_days, cfg.view_weight, cfg.impression_weight, now=now)
+        target, reason = target_tier(score, Tier(ps.tier), cfg, ps.last_tier_change, now=now)
         if target.value != ps.tier:
             planned.append((score, ps.tier, target.value, reason, site.domain, ps.url))
     planned.sort(key=lambda p: p[0])
     for score, cur, tgt, reason, dom, url in planned:
         print(f"{cur} -> {tgt}  heat {score:8.2f}  {dom}  {url}  ({reason})")
-    print(f"\n{len(planned)} planned transition(s) out of {len(rows)} pages; nothing was applied.")
+    print(f"\n{len(planned)} planned transition(s) out of {len(rows)} partner pages; "
+          f"nothing was applied.")
 
 
 def cmd_transitions(args):
@@ -194,18 +210,51 @@ def cmd_transitions(args):
         print(f"(no tier changes in the last {args.since})")
 
 
-def _mutation_stub(name: str, args):
+def _manual(name: str, args):
+    """Manual transition: operator's call (skips dwell gate + heat thresholds)
+    but the exact same pipeline as the bot — fetch, archive (t3), indexer
+    message, page_stats update."""
     PageStat, Site, Partner, PageArchive, SessionLocal = _db()
+    from shared.messages import get_redis
+    from shared.tiers import TIER_ORDER, Tier, TierConfig, heat
+    from crawler.tierbot import transition_page
     db = SessionLocal()
     ps = db.query(PageStat).filter(PageStat.url == args.url).first()
-    db.close()
     if not ps:
         sys.exit(f"no page_stats row for {args.url}")
-    print(f"{name} {args.url}: current tier {ps.tier}. "
-          f"Manual {name}s run the tier bot's code path (fetch, archive, "
-          f"indexer message, page_stats update) and land with build order 4. "
-          f"For now, adjust the page's tier row or let the bot decide.")
-    sys.exit(0)
+    site = db.get(Site, ps.site_id)
+    if site is None:
+        sys.exit("no site row for this page")
+    partner = (db.query(Partner).filter(Partner.site_id == site.id,
+                                        Partner.enabled.is_(True)).first()
+               if site else None)
+    if not partner:
+        sys.exit("no enabled partner for this page (tiering is partner-only)")
+    cfg = TierConfig(**(partner.tier_config or {}))
+    score = heat(ps.hits, ps.impressions, ps.last_accessed_at,
+                 cfg.half_life_days, cfg.view_weight, cfg.impression_weight)
+    cur = Tier(ps.tier)
+    if name == "demote":
+        idx = TIER_ORDER.index(cur)
+        if idx >= len(TIER_ORDER) - 1:
+            sys.exit(f"already at {cur.value} (vault)")
+        target = TIER_ORDER[idx + 1]
+    else:
+        target = Tier(args.tier) if args.tier else None
+        if target is None:
+            if cur is Tier.t0:
+                sys.exit(f"already at {cur.value} (full)")
+            target = TIER_ORDER[TIER_ORDER.index(cur) - 1]
+        if target is Tier.t3:
+            sys.exit("promote target must be t0, t1 or t2")
+        if target is cur:
+            sys.exit(f"already at {cur.value}")
+    result = transition_page(db=db, r=get_redis(), ps=ps, site=site, partner=partner,
+                             to_tier=target, score=score)
+    final = ps.tier if result == "fetch_failed" else target.value
+    db.close()
+    print(f"{name} {args.url}: {result}, now at {final} "
+          f"(manual overrides dwell/thresholds; the bot re-evaluates heat on the next pass)")
 
 
 def main():
@@ -229,14 +278,14 @@ def main():
     p.add_argument("--since", default="24h", help="window: 90m / 24h / 7d (default 24h)")
     p.set_defaults(fn=cmd_transitions)
 
-    p = sub.add_parser("promote", help="manual promote (stub: build order 4)")
+    p = sub.add_parser("promote", help="manual promote: one step up, or jump to --tier")
     p.add_argument("url")
     p.add_argument("--tier", choices=["t0", "t1", "t2"], default=None)
-    p.set_defaults(fn=lambda a: _mutation_stub("promote", a))
+    p.set_defaults(fn=lambda a: _manual("promote", a))
 
-    p = sub.add_parser("demote", help="manual demote (stub: build order 4)")
+    p = sub.add_parser("demote", help="manual demote: one step down (t3 = vault)")
     p.add_argument("url")
-    p.set_defaults(fn=lambda a: _mutation_stub("demote", a))
+    p.set_defaults(fn=lambda a: _manual("demote", a))
 
     args = ap.parse_args()
     args.fn(args)

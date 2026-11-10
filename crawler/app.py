@@ -7,16 +7,18 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from shared.config import load_profiles
 from shared.messages import Depth, MoveMsg, get_redis, publish
-from .db import PageStat, SessionLocal, Site, init_db, utcnow
+from .db import PageArchive, PageStat, SessionLocal, Site, init_db, utcnow
 from .feedwatcher import feed_worker_loop
 from .radar import sync_radar
 from .registry import sync_manual, upsert_site
 from .scheduler import worker_loop
+from .tierbot import tier_worker_loop
 
 logging.basicConfig(level=logging.INFO)
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 WORKERS = int(os.getenv("CRAWL_WORKERS", "1"))
 FEED_WORKERS = int(os.getenv("FEED_WORKERS", "1"))
+TIER_BOT = os.getenv("TIER_BOT", "1") != "0"
 stop = threading.Event()
 
 
@@ -29,6 +31,8 @@ async def lifespan(app):
         threading.Thread(target=worker_loop, args=(stop,), daemon=True).start()
     for _ in range(FEED_WORKERS):
         threading.Thread(target=feed_worker_loop, args=(stop,), daemon=True).start()
+    if TIER_BOT:
+        threading.Thread(target=tier_worker_loop, args=(stop,), daemon=True).start()
     yield
     stop.set()
 
@@ -147,18 +151,29 @@ class Hit(BaseModel):
     url: str
     site_domain: str
     count: int = 1
+    impressions: int = 0     # times served in a result set / AI summary (tiering signal)
 
 
 @api.post("/hits")
 def hits(batch: list[Hit]):
-    """Your search server reports which pages users actually open => drives page-level depth."""
+    """Your search server reports which pages users actually open => drives
+    heat (page opens) and impressions (appearances). A first hit on a vaulted
+    (page_archives) page re-creates its page_stats row at t3, not the t0
+    default, so the tier bot promotes it back up through heat instead of
+    demoting a hot page."""
     with SessionLocal() as s:
         for h in batch:
             site = s.execute(select(Site).where(Site.domain == h.site_domain)).scalar_one_or_none()
             if not site:
                 continue
-            ps = s.get(PageStat, h.url) or PageStat(url=h.url, site_id=site.id, hits=0)
+            if s.get(PageStat, h.url) is None and s.get(PageArchive, h.url) is not None:
+                ps = PageStat(url=h.url, site_id=site.id, hits=0, tier="t3")
+            else:
+                ps = s.get(PageStat, h.url) or PageStat(url=h.url, site_id=site.id, hits=0)
             ps.hits += h.count
+            ps.impressions += h.impressions
+            if h.count:
+                ps.last_accessed_at = utcnow()
             ps.updated_at = utcnow()
             s.merge(ps)
         s.commit()

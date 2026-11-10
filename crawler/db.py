@@ -98,3 +98,16 @@ class PageArchive(Base):
 
 def init_db():
     Base.metadata.create_all(engine)
+
+
+def archive_page(url: str, site_id: int, text: str, content_hash: str | None = None):
+    """Write the cold store for a vaulted page (idempotent: an existing row
+    is left untouched). Called by the tier bot before publishing a demote to
+    t3 (archive BEFORE delete, see docs/tiering.md) and by the feed watcher's
+    ingest gate for pages never vectorized."""
+    with SessionLocal() as s:
+        if s.get(PageArchive, url):
+            return
+        s.add(PageArchive(url=url, site_id=site_id, text=text, content_hash=content_hash,
+                          tier="t3", archived_at=utcnow()))
+        s.commit()

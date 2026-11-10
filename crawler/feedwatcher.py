@@ -22,7 +22,7 @@ from shared.config import load_profiles
 from shared.extract import extract_headline, extract_published, extract_sections, parse_dt
 from shared.gate import ingest_gate
 from shared.messages import Depth, PageMsg, Section, get_redis, publish
-from .db import PageArchive, PageStat, Partner, SessionLocal, Site, utcnow
+from .db import PageArchive, PageStat, Partner, SessionLocal, Site, archive_page, utcnow
 from .fetch import SiteCrawler, TIMEOUT, UA
 from .registry import upsert_site
 
@@ -95,15 +95,6 @@ def _touch_page_stat(url: str, site_id: int, content_hash: str):
         s.commit()
 
 
-def _archive(url: str, site_id: int, text: str, content_hash: str | None = None):
-    with SessionLocal() as s:
-        if s.get(PageArchive, url):
-            return
-        s.add(PageArchive(url=url, site_id=site_id, text=text, content_hash=content_hash,
-                          tier="t3", archived_at=utcnow()))
-        s.commit()
-
-
 def _finish(partner_id: int, status: str, success: bool):
     with SessionLocal() as s:
         p = s.get(Partner, partner_id)
@@ -138,7 +129,7 @@ def handle_item(*, partner: Partner, site: Site, r, url: str, title: str, text: 
             sections=sections or [Section(heading=title or url, heading_tag="h1", text=text)]))
         _touch_page_stat(url, site.id, content_hash)
     elif d.action == "archive":
-        _archive(url, site.id, text, content_hash)
+        archive_page(url, site.id, text, content_hash)
     log.debug("%s -> %s (%s)", url, d.action, d.reason)
     return d.action
 

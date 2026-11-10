@@ -5,7 +5,8 @@ S3-storage-class-style lifecycle for partner content in Qdrant. Partner sites
 for. Goal: store hot content fully so vector search finds it, park cold
 content where it costs ~10x less, without losing it.
 
-Status: scaffold in place (build order 1-2 done). See checkboxes below.
+Status: build order 1-5 done (tiering, indexer handlers, feed watcher,
+tier bot, tierctl). See checkboxes below.
 
 ## Tiers
 
@@ -135,6 +136,41 @@ delete points the gate intentionally left unindexed (t3 archives, boilerplate
 skips). Deletion of partner pages is the tier bot's job; points of pages a
 partner removed are reclaimed by heat decay -> demote.
 
+## Tier bot (build order 4)
+
+`crawler/tierbot.py` runs as one thread in the crawler app (`TIER_BOT=0` to
+disable, `TIER_EVAL_MINUTES` for the interval, default 60). Each pass
+(`evaluate_pass`) evaluates every page of every enabled partner — exactly the
+rows tierctl's dry-run inspects:
+
+1. **compute heat** with the page's partner `TierConfig` (per-partner
+   overrides in `partners.tier_config`, defaults in `shared/tiers.py`)
+2. **decide** via `shared.tiers.target_tier` (one step per pass, dwell gate
+   on demote, hysteresis floors/thresholds)
+3. **fetch the page** — archive text and re-embed sections must come from a
+   live copy; a failed fetch skips the transition (page keeps its tier, the
+   safe direction both ways)
+4. **publish + update**: demote to t3 archives to `page_archives` FIRST
+   (archive-before-delete; a crash in between is harmless and re-demotes),
+   then `DemoteMsg`; any move that keeps vectors publishes `PromoteMsg`
+   (delete old points, re-embed the target tier's representation: t0 all
+   sections, t1 the lede section, t2 one stub of title + h1 + meta
+   description). page_stats (tier, heat, last_tier_change) is committed
+   after the message goes out.
+
+`heat()` refreshes on every pass even for held pages, so `tierctl heat`
+always shows the current decayed score.
+
+Metering (`POST /hits`): a hit stamps `last_accessed_at` (a page open IS an
+access — without it heat stayed 0 no matter the hit count) and accepts an
+`impressions` count. A first hit on a vaulted page re-creates its
+`page_stats` row **at t3** (not the t0 default), so heat promotes it back up
+instead of demoting a hot page.
+
+`tierctl promote/demote` run the same `transition_page` pipeline as the bot
+(fetch, archive, message, page_stats) — the operator just overrides the
+dwell gate and heat thresholds (one step, or `--tier` to jump).
+
 ## Build order
 
 - [x] 1. Schema: `partners` table, `page_stats` tier fields (impressions,
@@ -146,9 +182,10 @@ partner removed are reclaimed by heat decay -> demote.
 - [x] 3. Feed watcher: per-partner poll (crawl / rss / api adapters) -> ingest
       gate -> PageMsg(t0) or straight to t3 (`crawler/feedwatcher.py`,
       `shared/gate.py`, `tests/test_gate.py`)
-- [ ] 4. Tier bot: scheduled heat evaluation, transition messages,
-      page_stats updates
-- [ ] 5. tierctl CLI: monitoring/debug (spec below)
+- [x] 4. Tier bot: scheduled heat evaluation, transition messages,
+      page_stats updates (`crawler/tierbot.py`, `tests/test_tierbot.py`)
+- [x] 5. tierctl CLI: monitoring/debug (`cli/tierctl.py`; dry-run mirrors
+      `evaluate_pass`, promote/demote run the bot's pipeline)
 - [ ] 6. Backfill job: onboarding crawl with the ingest gate
 - [ ] 7. Search side: keyword fallback over page_stats/page_archives so t3
       pages stay reachable, with a restore action
@@ -164,7 +201,8 @@ tierctl status [--partner DOMAIN]    tier distribution + est. storage,
                                      per partner/site
 tierctl heat URL                     hits/impressions/idle/decay, computed
                                      heat, current vs expected tier
-tierctl dry-run [--partner DOMAIN]   evaluate every page, list planned
+tierctl dry-run [--partner DOMAIN]   evaluate partner pages (the same rows
+                                     the bot sees), list planned
                                      transitions, apply nothing
 tierctl transitions [--since 24h]    recent tier changes
 tierctl promote URL [--tier t0|t1|t2]
