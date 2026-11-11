@@ -29,8 +29,8 @@ from bs4 import BeautifulSoup
 from shared.config import load_profiles
 from shared.extract import extract_headline, extract_sections
 from shared.messages import DemoteMsg, PromoteMsg, Section, get_redis, publish
-from shared.tiers import TIER_ORDER, Tier, heat, target_tier, tier_config_for
-from .db import PageArchive, PageStat, Partner, SessionLocal, Site, archive_page, utcnow
+from shared.tiers import TIER_ORDER, Tier, as_utc, heat, target_tier, tier_config_for
+from .db import PageArchive, PageStat, Partner, SessionLocal, Site, archive_page, record_event, utcnow
 from .fetch import TIMEOUT, UA
 
 log = logging.getLogger("tierbot")
@@ -67,17 +67,18 @@ def _sections_for(headline: str, title: str, sections: list[Section], to_tier: T
 
 
 def transition_page(*, db, r, ps: PageStat, site: Site, partner: Partner,
-                    to_tier: Tier, score: float, now=None) -> str:
+                    to_tier: Tier, score: float, now=None, via: str = "auto") -> str:
     """Move one page to `to_tier` end to end: fetch, (archive), publish,
-    page_stats update. The bot's decision is always one step; the manual CLI
-    may jump several. Commits the stats update itself. Returns 'demoted',
-    'promoted', 'hold' or 'fetch_failed'."""
+    page_stats update, tier_events log row. The bot's decision is always one
+    step; the manual CLI may jump several (via='manual'). Commits the stats
+    update itself. Returns 'demoted', 'promoted', 'hold' or 'fetch_failed'."""
     now = now or utcnow()
     cur = Tier(ps.tier)
     if to_tier is cur:
         ps.heat = score
         db.commit()
         return "hold"
+    prev_change = ps.last_tier_change
     try:
         title, headline, sections = _fetch(ps.url)
     except Exception as e:
@@ -102,16 +103,23 @@ def transition_page(*, db, r, ps: PageStat, site: Site, partner: Partner,
     if not ps.title:
         ps.title = title                                      # fresh copy, stamp it
     db.commit()
-    return "demoted" if TIER_ORDER.index(to_tier) > TIER_ORDER.index(cur) else "promoted"
+    result = "demoted" if TIER_ORDER.index(to_tier) > TIER_ORDER.index(cur) else "promoted"
+    prev = as_utc(prev_change)
+    dwell = (now - prev).total_seconds() / 3600.0 if prev else None
+    record_event(ps.url, site.id, "demote" if result == "demoted" else "promote",
+                 from_tier=cur.value, to_tier=to_tier.value,
+                 via=via, dwell_hours=dwell, ts=now)
+    return result
 
 
-def restore_page(*, db, r, url: str, to_tier: Tier = Tier.t0) -> str:
+def restore_page(*, db, r, url: str, to_tier: Tier = Tier.t0, via: str = "auto") -> str:
     """Restore a vaulted page from page_archives: re-embed the archived copy
     WITHOUT a live fetch (the page may no longer exist — that is exactly when
     restore matters). Publishes a PromoteMsg with the archived sections and
     (re)creates the page_stats row at the target tier. The archive row is
     kept as the cold copy; a later re-demotion refreshes it with fresh text.
-    Returns 'restored' or 'no_archive'."""
+    Logs a tier_events row with dwell_hours = time spent in the vault
+    (restore latency). Returns 'restored' or 'no_archive'."""
     arch = db.get(PageArchive, url)
     if arch is None:
         return "no_archive"
@@ -135,6 +143,10 @@ def restore_page(*, db, r, url: str, to_tier: Tier = Tier.t0) -> str:
     ps = db.get(PageStat, url) or PageStat(url=url, site_id=site.id, hits=0)
     ps.tier, ps.title, ps.last_tier_change, ps.updated_at = to_tier.value, title, now, now
     db.commit()
+    archived = as_utc(arch.archived_at)
+    vaulted_for = (now - archived).total_seconds() / 3600.0 if archived else 0.0
+    record_event(url, site.id, "restore", from_tier="t3", to_tier=to_tier.value,
+                 via=via, dwell_hours=vaulted_for, ts=now)
     return "restored"
 
 

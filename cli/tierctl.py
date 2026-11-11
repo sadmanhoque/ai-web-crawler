@@ -10,6 +10,7 @@ Usage (from anywhere; needs DATABASE_URL, crawler side):
     python3 cli/tierctl.py heat URL
     python3 cli/tierctl.py dry-run [--partner DOMAIN]
     python3 cli/tierctl.py transitions [--since 24h]
+    python3 cli/tierctl.py metrics [--partner DOMAIN] [--since 30d]
     python3 cli/tierctl.py config [DOMAIN]        # effective tiering parameters
     python3 cli/tierctl.py promote URL [--tier t0|t1|t2]   # one step up, or jump to --tier
     python3 cli/tierctl.py demote URL                       # one step down
@@ -27,13 +28,13 @@ TIER_KB = {"t0": 9.0, "t1": 3.0, "t2": 3.5, "t3": 0.5}
 
 def _db():
     try:
-        from crawler.db import PageArchive, PageStat, Partner, Site, SessionLocal
+        from crawler.db import PageArchive, PageStat, Partner, SessionLocal, Site, TierEvent
     except KeyError:
         sys.exit("DATABASE_URL is not set (tierctl runs on the crawler side)")
     except ModuleNotFoundError as e:
         sys.exit(f"missing dependency {e.name!r} — run tierctl inside the crawler "
                  f"environment (deps from crawler/requirements.txt)")
-    return PageStat, Site, Partner, PageArchive, SessionLocal
+    return PageStat, Site, Partner, PageArchive, SessionLocal, TierEvent
 
 
 def _parse_since(s: str) -> float:
@@ -109,7 +110,7 @@ def cmd_config(args):
         declared = sorted(tf.partners)
         print(f"\ndeclared partner blocks: {', '.join(declared) if declared else '(none — all partners use defaults)'}")
         return
-    _, _, Partner, _, SessionLocal = _db()
+    _, _, Partner, _, SessionLocal, _ = _db()
     db = SessionLocal()
     partner = db.query(Partner).filter(Partner.domain == args.partner).first()
     db.close()
@@ -137,10 +138,10 @@ def cmd_config(args):
 
 
 def cmd_status(args):
-    PageStat, Site, Partner, PageArchive, SessionLocal = _db()
+    PageStat, Site, Partner, PageArchive, SessionLocal, _ = _db()
     rows = _rows(PageStat, Site, SessionLocal, args.partner)
     per_site: dict[str, dict] = {}
-    archive_sites: dict[str, int] = {}
+    archive_sites: dict[int, int] = {}
     db = SessionLocal()
     pairs = db.query(PageArchive.site_id).all()
     db.close()
@@ -181,7 +182,7 @@ def cmd_status(args):
 
 
 def cmd_heat(args):
-    PageStat, Site, Partner, PageArchive, SessionLocal = _db()
+    PageStat, Site, Partner, PageArchive, SessionLocal, _ = _db()
     from datetime import datetime, timezone
     db = SessionLocal()
     ps = db.query(PageStat).filter(PageStat.url == args.url).first()
@@ -210,7 +211,7 @@ def cmd_heat(args):
 
 
 def cmd_dry_run(args):
-    PageStat, Site, Partner, PageArchive, SessionLocal = _db()
+    PageStat, Site, Partner, PageArchive, SessionLocal, _ = _db()
     from datetime import datetime, timezone
     from shared.tiers import Tier, heat, target_tier, tier_config_for
     now = datetime.now(timezone.utc)
@@ -240,25 +241,150 @@ def cmd_dry_run(args):
 
 
 def cmd_transitions(args):
-    PageStat, Site, Partner, PageArchive, SessionLocal = _db()
+    PageStat, Site, Partner, PageArchive, SessionLocal, TierEvent = _db()
     from datetime import datetime, timezone, timedelta
     db = SessionLocal()
     since = datetime.now(timezone.utc) - timedelta(hours=_parse_since(args.since))
-    rows = db.query(PageStat, Site).join(Site, Site.id == PageStat.site_id) \
-        .filter(PageStat.last_tier_change >= since).all()
+    rows = db.query(TierEvent, Site).join(Site, Site.id == TierEvent.site_id) \
+        .filter(TierEvent.ts >= since).order_by(TierEvent.ts.desc()).all()
     db.close()
-    for ps, site in rows:
-        print(f"{ps.last_tier_change:%Y-%m-%d %H:%M} UTC  {ps.tier:<4} heat {ps.heat:8.2f}  "
-              f"{site.domain:<30} {ps.url}")
+    for ev, site in rows:
+        print(f"{ev.ts:%Y-%m-%d %H:%M} UTC  {ev.kind:<8} "
+              f"{ev.from_tier or '-'} -> {ev.to_tier or '-'}  {ev.via:<6} "
+              f"{site.domain:<30} {ev.url}")
     if not rows:
-        print(f"(no tier changes in the last {args.since})")
+        print(f"(no tier events in the last {args.since})")
+
+
+def _human_kb(kb: float) -> str:
+    if kb >= 1024 * 1024:
+        return f"{kb / 1024 / 1024:.1f} GB"
+    if kb >= 1024:
+        return f"{kb / 1024:.1f} MB"
+    return f"{kb:.0f} KB"
+
+
+def _human_hours(h: float | None) -> str:
+    if h is None:
+        return "-"
+    return f"{h / 24:.1f}d" if h >= 48 else f"{h:.1f}h"
+
+
+def _median(vals: list[float]) -> float | None:
+    if not vals:
+        return None
+    s = sorted(vals)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+
+def cmd_metrics(args):
+    """Tiering metrics (build order 8): pages + est. storage per tier per
+    partner (current state from page_stats), transition rate and restore
+    latency (tier_events within --since), and vault depth/age (page_archives)."""
+    PageStat, Site, Partner, PageArchive, SessionLocal, TierEvent = _db()
+    from datetime import datetime, timezone, timedelta
+    from shared.tiers import as_utc
+    now = datetime.now(timezone.utc)
+    window_h = _parse_since(args.since)
+    since = now - timedelta(hours=window_h)
+
+    db = SessionLocal()
+    q = (db.query(Partner.domain, PageStat.tier)
+         .join(Site, Site.id == PageStat.site_id)
+         .join(Partner, Partner.site_id == Site.id)
+         .filter(Partner.enabled.is_(True)))
+    if args.partner:
+        q = q.filter(Partner.domain == args.partner)
+    by_partner: dict[str, dict] = {}
+    totals = {t: 0 for t in ("t0", "t1", "t2", "t3")}
+    for domain, tier in q.all():
+        c = by_partner.setdefault(domain, {t: 0 for t in totals})
+        c[tier] += 1
+        totals[tier] += 1
+
+    eq = db.query(TierEvent, Site).join(Site, Site.id == TierEvent.site_id) \
+        .filter(TierEvent.ts >= since).order_by(TierEvent.ts)
+    if args.partner:
+        eq = eq.join(Partner, Partner.site_id == Site.id) \
+               .filter(Partner.domain == args.partner)
+    events = [ev for ev, _site in eq.all()]
+
+    vq = db.query(PageArchive).join(Site, Site.id == PageArchive.site_id)
+    if args.partner:
+        vq = vq.join(Partner, Partner.site_id == Site.id) \
+               .filter(Partner.domain == args.partner)
+    vault_ages = []
+    for a in vq.all():
+        ts = as_utc(a.archived_at)
+        if ts is not None:
+            vault_ages.append((now - ts).total_seconds() / 3600.0)
+    vault_ages.sort()
+    db.close()
+
+    name_w = max([len(d) for d in by_partner] + [len("TOTAL")])
+    print(f"pages per tier (current, {args.partner or 'all partners'}):")
+    print(f"  {'partner':<{name_w}}  "
+          + "  ".join(f"{t:>5}" for t in ("t0", "t1", "t2", "t3"))
+          + f"  {'total':>6}  est. storage")
+    for domain in sorted(by_partner):
+        c = by_partner[domain]
+        tot = sum(c.values())
+        kb = sum(c[t] * TIER_KB[t] for t in c)
+        print(f"  {domain:<{name_w}}  "
+              + "  ".join(f"{c[t]:>5}" for t in ("t0", "t1", "t2", "t3"))
+              + f"  {tot:>6}  {_human_kb(kb)}")
+    tot_all = sum(totals.values())
+    kb_all = sum(totals[t] * TIER_KB[t] for t in totals)
+    if by_partner:
+        print(f"  {'TOTAL':<{name_w}}  "
+              + "  ".join(f"{totals[t]:>5}" for t in ("t0", "t1", "t2", "t3"))
+              + f"  {tot_all:>6}  {_human_kb(kb_all)}")
+    else:
+        print("  (no partner pages)")
+
+    print("\nstorage per tier (current):")
+    for t in ("t0", "t1", "t2", "t3"):
+        print(f"  {t}  {totals[t]:>5} pages  {_human_kb(totals[t] * TIER_KB[t])}")
+
+    print(f"\ntransitions (last {args.since}, tier_events):")
+    by_kind: dict[str, dict] = {}
+    for ev in events:
+        b = by_kind.setdefault(ev.kind, {"auto": 0, "manual": 0})
+        b[ev.via if ev.via in b else "auto"] += 1
+    if by_kind:
+        for kind in ("demote", "promote", "restore", "archive"):
+            if kind in by_kind:
+                b = by_kind[kind]
+                note = "  (at ingest, straight to the vault)" if kind == "archive" else ""
+                print(f"  {kind:<8} {sum(b.values()):>5}   (auto {b['auto']}, "
+                      f"manual {b['manual']}){note}")
+        print(f"  rate:     {len(events) / (window_h / 24.0):.1f} events/day")
+    else:
+        print("  (no events in window)")
+
+    print(f"\nrestore latency (last {args.since}, time in the vault):")
+    lat = sorted(ev.dwell_hours for ev in events
+                 if ev.kind == "restore" and ev.dwell_hours is not None)
+    if lat:
+        print(f"  n={len(lat)}  min {_human_hours(lat[0])}  "
+              f"median {_human_hours(_median(lat))}  max {_human_hours(lat[-1])}")
+    else:
+        print("  (no restores in window)")
+
+    print("\nvault (current, page_archives):")
+    if vault_ages:
+        print(f"  {len(vault_ages)} cold copies, median age "
+              f"{_human_hours(_median(vault_ages))}, oldest {_human_hours(vault_ages[-1])}")
+    else:
+        print("  (vault empty)")
 
 
 def _manual(name: str, args):
     """Manual transition: operator's call (skips dwell gate + heat thresholds)
     but the exact same pipeline as the bot — fetch, archive (t3), indexer
     message, page_stats update."""
-    PageStat, Site, Partner, PageArchive, SessionLocal = _db()
+    PageStat, Site, Partner, PageArchive, SessionLocal, _ = _db()
     from shared.messages import get_redis
     from shared.tiers import TIER_ORDER, Tier, heat, tier_config_for
     from crawler.tierbot import transition_page
@@ -294,7 +420,7 @@ def _manual(name: str, args):
         if target is cur:
             sys.exit(f"already at {cur.value}")
     result = transition_page(db=db, r=get_redis(), ps=ps, site=site, partner=partner,
-                             to_tier=target, score=score)
+                             to_tier=target, score=score, via="manual")
     final = ps.tier if result == "fetch_failed" else target.value
     db.close()
     print(f"{name} {args.url}: {result}, now at {final} "
@@ -305,14 +431,15 @@ def _restore(args):
     """Restore a vaulted page from page_archives: re-embed the archived copy,
     no live fetch (the page may be gone). Same publish pipeline as the bot's
     transitions; heat re-tiers the page on the next pass."""
-    _, _, _, _, SessionLocal = _db()
+    _, _, _, _, SessionLocal, _ = _db()
     from shared.messages import get_redis
     from shared.tiers import Tier
     from crawler.tierbot import restore_page
     tier = Tier(args.tier) if args.tier else Tier.t0
     db = SessionLocal()
     try:
-        result = restore_page(db=db, r=get_redis(), url=args.url, to_tier=tier)
+        result = restore_page(db=db, r=get_redis(), url=args.url, to_tier=tier,
+                              via="manual")
     finally:
         db.close()
     if result == "no_archive":
@@ -338,9 +465,16 @@ def main():
     p.add_argument("--partner", help="filter by partner/site domain")
     p.set_defaults(fn=cmd_dry_run)
 
-    p = sub.add_parser("transitions", help="recent tier changes")
+    p = sub.add_parser("transitions", help="recent tier events (tier_events log)")
     p.add_argument("--since", default="24h", help="window: 90m / 24h / 7d (default 24h)")
     p.set_defaults(fn=cmd_transitions)
+
+    p = sub.add_parser("metrics",
+                       help="pages/storage per tier, transition rate, restore latency")
+    p.add_argument("--partner", help="filter by partner domain")
+    p.add_argument("--since", default="30d",
+                   help="window for the event-based metrics (default 30d)")
+    p.set_defaults(fn=cmd_metrics)
 
     p = sub.add_parser("config", help="effective tiering parameters + provenance")
     p.add_argument("partner", nargs="?", help="partner domain (omit for file defaults)")

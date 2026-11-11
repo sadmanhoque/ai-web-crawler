@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timezone
-from sqlalchemy import JSON, DateTime, String, Text, create_engine
+from sqlalchemy import JSON, DateTime, Float, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
@@ -100,8 +100,39 @@ class PageArchive(Base):
     archived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class TierEvent(Base):
+    """Append-only log of tiering actions: transitions (auto bot or manual
+    tierctl), restores, and ingest-time archiving straight to the vault.
+    Feeds `tierctl metrics` (transition rate, restore latency) and
+    `tierctl transitions` (full history, not just each page's last change).
+    Never updated or deleted: it is the system's audit trail."""
+    __tablename__ = "tier_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    url: Mapped[str] = mapped_column(String(2048), index=True)
+    site_id: Mapped[int] = mapped_column(index=True)
+    kind: Mapped[str] = mapped_column(String(16))            # promote | demote | restore | archive
+    from_tier: Mapped[str | None] = mapped_column(String(8))
+    to_tier: Mapped[str | None] = mapped_column(String(8))
+    via: Mapped[str] = mapped_column(String(8), default="auto")     # auto (bot) | manual (tierctl)
+    dwell_hours: Mapped[float | None] = mapped_column(Float)        # hours in from_tier before this action
+                                                                     # (restore: hours spent in the vault)
+
+
 def init_db():
     Base.metadata.create_all(engine)
+
+
+def record_event(url: str, site_id: int, kind: str, from_tier: str | None = None,
+                 to_tier: str | None = None, via: str = "auto",
+                 dwell_hours: float | None = None, ts: datetime | None = None):
+    """Append one row to the tiering event log. Its own session + commit:
+    small and infrequent, and it must not hold the caller's session open."""
+    with SessionLocal() as s:
+        s.add(TierEvent(url=url, site_id=site_id, kind=kind, from_tier=from_tier,
+                        to_tier=to_tier, via=via, dwell_hours=dwell_hours,
+                        ts=ts or utcnow()))
+        s.commit()
 
 
 def archive_page(url: str, site_id: int, text: str, content_hash: str | None = None,

@@ -22,7 +22,7 @@ from shared.config import load_profiles
 from shared.extract import extract_headline, extract_published, extract_sections, parse_dt
 from shared.gate import ingest_gate
 from shared.messages import Depth, PageMsg, Section, get_redis, publish
-from .db import PageArchive, PageStat, Partner, SessionLocal, Site, archive_page, utcnow
+from .db import PageArchive, PageStat, Partner, SessionLocal, Site, archive_page, record_event, utcnow
 from .fetch import SiteCrawler, TIMEOUT, UA
 from .registry import upsert_site
 
@@ -134,6 +134,7 @@ def handle_item(*, partner: Partner, site: Site, r, url: str, title: str, text: 
     elif d.action == "archive":
         archive_page(url, site.id, text, content_hash,
                      title=title or None, sections=sections)
+        record_event(url, site.id, "archive", to_tier="t3")   # straight to the vault at ingest
     log.debug("%s -> %s (%s)", url, d.action, d.reason)
     return d.action
 

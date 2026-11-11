@@ -203,6 +203,35 @@ def main():
           and stats3 == {"evaluated": 6, "hold": 5, "promoted": 0, "demoted": 0,
                          "fetch_failed": 1}, (tiers(), stats3))
 
+    # --- tier_events log (build order 8): audit trail of every applied action ---
+    from crawler.db import TierEvent
+    db = SessionLocal()
+    evs = db.query(TierEvent).order_by(TierEvent.id).all()
+    db.close()
+    by_url: dict[str, list] = {}
+    for e in evs:
+        by_url.setdefault(e.url, []).append(e)
+    check("7 events: 4 pass-1 transitions + 1 manual jump + 2 restores",
+          len(evs) == 7, [ (e.url, e.kind) for e in evs ])
+    u1 = by_url["https://p.test/u1"][0]
+    check("u1: demote t0 -> t1, via auto, dwell ~720h (30 days in t0)",
+          u1.kind == "demote" and u1.via == "auto" and u1.from_tier == "t0"
+          and u1.to_tier == "t1" and abs(u1.dwell_hours - 720.0) < 1,
+          (u1.kind, u1.from_tier, u1.to_tier, u1.dwell_hours))
+    check("u2: demote to t3 then two restores, restore latency recorded",
+          [e.kind for e in by_url["https://p.test/u2"]] == ["demote", "restore", "restore"]
+          and by_url["https://p.test/u2"][0].to_tier == "t3"
+          and all(e.dwell_hours is not None and e.dwell_hours > 0
+                  for e in by_url["https://p.test/u2"] if e.kind == "restore"),
+          [(e.kind, e.to_tier, e.dwell_hours) for e in by_url["https://p.test/u2"]])
+    check("u3: promote t3 -> t2 then manual jump t2 -> t0, in order",
+          [(e.kind, e.from_tier, e.to_tier) for e in by_url["https://p.test/u3"]]
+          == [("promote", "t3", "t2"), ("promote", "t2", "t0")],
+          [(e.kind, e.from_tier, e.to_tier) for e in by_url["https://p.test/u3"]])
+    check("hold / fetch_failed / no-op log nothing",
+          "https://p.test/u4" not in by_url and "https://p.test/dead" not in by_url,
+          list(by_url))
+
     os.remove(_DB)
     print("all tierbot tests passed")
 
