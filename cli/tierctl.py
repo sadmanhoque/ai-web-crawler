@@ -13,6 +13,7 @@ Usage (from anywhere; needs DATABASE_URL, crawler side):
     python3 cli/tierctl.py config [DOMAIN]        # effective tiering parameters
     python3 cli/tierctl.py promote URL [--tier t0|t1|t2]   # one step up, or jump to --tier
     python3 cli/tierctl.py demote URL                       # one step down
+    python3 cli/tierctl.py restore URL [--tier t0|t1|t2]    # vaulted page back, from the archive
 """
 import argparse
 import os
@@ -300,6 +301,26 @@ def _manual(name: str, args):
           f"(manual overrides dwell/thresholds; the bot re-evaluates heat on the next pass)")
 
 
+def _restore(args):
+    """Restore a vaulted page from page_archives: re-embed the archived copy,
+    no live fetch (the page may be gone). Same publish pipeline as the bot's
+    transitions; heat re-tiers the page on the next pass."""
+    _, _, _, _, SessionLocal = _db()
+    from shared.messages import get_redis
+    from shared.tiers import Tier
+    from crawler.tierbot import restore_page
+    tier = Tier(args.tier) if args.tier else Tier.t0
+    db = SessionLocal()
+    try:
+        result = restore_page(db=db, r=get_redis(), url=args.url, to_tier=tier)
+    finally:
+        db.close()
+    if result == "no_archive":
+        sys.exit(f"no vaulted copy for {args.url} (only t3 pages can be restored)")
+    print(f"restore {args.url}: {result}, re-embedded from the archived copy at {tier.value} "
+          f"(heat re-tiers it on the next pass)")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="monitor the partner content tiering system (docs/tiering.md)")
@@ -333,6 +354,13 @@ def main():
     p = sub.add_parser("demote", help="manual demote: one step down (t3 = vault)")
     p.add_argument("url")
     p.set_defaults(fn=lambda a: _manual("demote", a))
+
+    p = sub.add_parser("restore",
+                       help="restore a vaulted page from the archive (re-embed, no fetch)")
+    p.add_argument("url")
+    p.add_argument("--tier", choices=["t0", "t1", "t2"], default=None,
+                   help="target tier (default t0 = full)")
+    p.set_defaults(fn=_restore)
 
     args = ap.parse_args()
     args.fn(args)

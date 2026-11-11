@@ -58,6 +58,7 @@ class PageStat(Base):
     last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_tier_change: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     content_hash: Mapped[str | None] = mapped_column(String(64))
+    title: Mapped[str | None] = mapped_column(String(2048))            # filled at index/transition time
     summary: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -86,12 +87,15 @@ class Partner(Base):
 class PageArchive(Base):
     """Cold text store for t3 (vault) pages: what vector search no longer
     holds, kept for restore. Written by the tier bot before demote, and by
-    the ingest gate for pages never vectorized."""
+    the ingest gate for pages never vectorized. title/sections let restore
+    re-embed the exact archived copy without a live fetch."""
     __tablename__ = "page_archives"
     url: Mapped[str] = mapped_column(String(2048), primary_key=True)
     site_id: Mapped[int] = mapped_column(index=True)
     content_hash: Mapped[str | None] = mapped_column(String(64))
     text: Mapped[str] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(String(2048))
+    sections: Mapped[list | None] = mapped_column(JSON, default=None)     # [{heading, heading_tag, text}]
     tier: Mapped[str] = mapped_column(String(8), default="t3")
     archived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -100,14 +104,27 @@ def init_db():
     Base.metadata.create_all(engine)
 
 
-def archive_page(url: str, site_id: int, text: str, content_hash: str | None = None):
-    """Write the cold store for a vaulted page (idempotent: an existing row
-    is left untouched). Called by the tier bot before publishing a demote to
-    t3 (archive BEFORE delete, see docs/tiering.md) and by the feed watcher's
-    ingest gate for pages never vectorized."""
+def archive_page(url: str, site_id: int, text: str, content_hash: str | None = None,
+                 title: str | None = None, sections: list | None = None):
+    """Write the cold store for a vaulted page (upsert: an existing row is
+    refreshed, so re-demoting a changed page does not leave a stale cold
+    copy). Called by the tier bot before publishing a demote to t3
+    (archive BEFORE delete, see docs/tiering.md) and by the feed watcher's
+    ingest gate for pages never vectorized. sections (shared.messages
+    Section models or plain dicts) are stored so restore can re-embed the
+    exact archived copy."""
+    sec = None
+    if sections:
+        sec = [s.model_dump() if hasattr(s, "model_dump") else dict(s) for s in sections]
     with SessionLocal() as s:
-        if s.get(PageArchive, url):
-            return
-        s.add(PageArchive(url=url, site_id=site_id, text=text, content_hash=content_hash,
-                          tier="t3", archived_at=utcnow()))
+        row = s.get(PageArchive, url)
+        if row is not None:
+            row.text, row.content_hash, row.archived_at = text, content_hash, utcnow()
+            if title is not None:
+                row.title = title
+            if sec is not None:
+                row.sections = sec
+        else:
+            s.add(PageArchive(url=url, site_id=site_id, text=text, content_hash=content_hash,
+                              title=title, sections=sec, tier="t3", archived_at=utcnow()))
         s.commit()

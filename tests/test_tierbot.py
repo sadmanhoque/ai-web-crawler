@@ -166,6 +166,43 @@ def main():
     db.close()
     check("manual no-op on same tier", result == "hold", result)
 
+    # --- restore (build order 7): vaulted page back from the archive ---
+    db = SessionLocal()
+    p = db.query(Partner).first()
+    assert p is not None
+    # u2 was demoted to t3 in pass 1; the archive now carries title + sections
+    arch = db.get(PageArchive, "https://p.test/u2")
+    assert arch is not None and arch.sections and arch.title == "Title"
+    n = len(captured)
+    result = tierbot.restore_page(db=db, r=None, url="https://p.test/u2", to_tier=Tier.t0)
+    db.close()
+    check("restore returns restored", result == "restored", result)
+    rm = captured[n:]
+    check("restore publishes a PromoteMsg to t0",
+          len(rm) == 1 and isinstance(rm[0], PromoteMsg) and rm[0].to_tier is Tier.t0, rm)
+    check("restore re-embeds the ARCHIVED sections (no live fetch)",
+          rm[0].sections == [LEDE, BODY] and rm[0].title == "Title", rm)
+    check("restore re-creates page_stats at t0",
+          tiers()["https://p.test/u2"][0] == "t0", tiers())
+    db = SessionLocal()
+    check("archive row kept as the cold copy",
+          db.get(PageArchive, "https://p.test/u2") is not None)
+    n = len(captured)
+    result = tierbot.restore_page(db=db, r=None, url="https://p.test/u2", to_tier=Tier.t1)
+    db.close()
+    check("restore --tier t1 keeps the lede only",
+          result == "restored" and tiers()["https://p.test/u2"][0] == "t1"
+          and captured[-1].sections == [LEDE])
+    db = SessionLocal()
+    check("restore of an un-archived url -> no_archive",
+          tierbot.restore_page(db=db, r=None, url="https://p.test/nope") == "no_archive")
+    db.close()
+    stats3 = tierbot.evaluate_pass(None, now=NOW)
+    check("restored page held by dwell on the next pass",
+          tiers()["https://p.test/u2"][0] == "t1"
+          and stats3 == {"evaluated": 6, "hold": 5, "promoted": 0, "demoted": 0,
+                         "fetch_failed": 1}, (tiers(), stats3))
+
     os.remove(_DB)
     print("all tierbot tests passed")
 

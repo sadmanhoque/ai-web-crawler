@@ -30,7 +30,7 @@ from shared.config import load_profiles
 from shared.extract import extract_headline, extract_sections
 from shared.messages import DemoteMsg, PromoteMsg, Section, get_redis, publish
 from shared.tiers import TIER_ORDER, Tier, heat, target_tier, tier_config_for
-from .db import PageStat, Partner, SessionLocal, Site, archive_page, utcnow
+from .db import PageArchive, PageStat, Partner, SessionLocal, Site, archive_page, utcnow
 from .fetch import TIMEOUT, UA
 
 log = logging.getLogger("tierbot")
@@ -89,7 +89,8 @@ def transition_page(*, db, r, ps: PageStat, site: Site, partner: Partner,
     if to_tier is Tier.t3:
         text = "\n".join(s.text for s in sections)
         archive_page(ps.url, site.id, text,
-                     hashlib.sha256(text.encode()).hexdigest())     # archive BEFORE delete
+                     hashlib.sha256(text.encode()).hexdigest(),
+                     title=title, sections=sections)          # archive BEFORE delete
         publish(r, DemoteMsg(site_id=site.id, collection=_collection_for(partner),
                              url=ps.url, to_tier=to_tier))
     else:
@@ -98,8 +99,43 @@ def transition_page(*, db, r, ps: PageStat, site: Site, partner: Partner,
                               url=ps.url, title=title, to_tier=to_tier,
                               sections=_sections_for(headline, title, sections, to_tier)))
     ps.tier, ps.heat, ps.last_tier_change, ps.updated_at = to_tier.value, score, now, now
+    if not ps.title:
+        ps.title = title                                      # fresh copy, stamp it
     db.commit()
     return "demoted" if TIER_ORDER.index(to_tier) > TIER_ORDER.index(cur) else "promoted"
+
+
+def restore_page(*, db, r, url: str, to_tier: Tier = Tier.t0) -> str:
+    """Restore a vaulted page from page_archives: re-embed the archived copy
+    WITHOUT a live fetch (the page may no longer exist — that is exactly when
+    restore matters). Publishes a PromoteMsg with the archived sections and
+    (re)creates the page_stats row at the target tier. The archive row is
+    kept as the cold copy; a later re-demotion refreshes it with fresh text.
+    Returns 'restored' or 'no_archive'."""
+    arch = db.get(PageArchive, url)
+    if arch is None:
+        return "no_archive"
+    site = db.get(Site, arch.site_id)
+    if site is None:
+        raise LookupError(f"no site row {arch.site_id} for vaulted page {url}")
+    partner = db.query(Partner).filter(Partner.site_id == site.id,
+                                       Partner.enabled.is_(True)).first()
+    if partner is None:
+        raise LookupError(f"no enabled partner for {site.domain}")
+    title = arch.title or url
+    if arch.sections:
+        sections = [Section(**s) for s in arch.sections]
+    else:                                            # archived before sections were kept
+        sections = [Section(heading=title, heading_tag="h1", text=arch.text)]
+    publish(r, PromoteMsg(site_id=site.id, domain=site.domain, profile=partner.profile,
+                          collection=_collection_for(partner), url=url, title=title,
+                          to_tier=to_tier,
+                          sections=_sections_for(arch.title or "", title, sections, to_tier)))
+    now = utcnow()
+    ps = db.get(PageStat, url) or PageStat(url=url, site_id=site.id, hits=0)
+    ps.tier, ps.title, ps.last_tier_change, ps.updated_at = to_tier.value, title, now, now
+    db.commit()
+    return "restored"
 
 
 def evaluate_pass(r, now=None, partner_domain: str | None = None) -> dict:

@@ -85,12 +85,15 @@ def _duplicate_of(content_hash: str, url: str) -> str | None:
         ).scalar_one_or_none()
 
 
-def _touch_page_stat(url: str, site_id: int, content_hash: str):
+def _touch_page_stat(url: str, site_id: int, content_hash: str, title: str | None = None):
     """Immediate dedup marker: the page is 'known' from this poll on, even
-    before the indexer or the first hit touches it."""
+    before the indexer or the first hit touches it. The title is stamped
+    while it is fresh (keyword search matches on it)."""
     with SessionLocal() as s:
         ps = s.get(PageStat, url) or PageStat(url=url, site_id=site_id, hits=0)
         ps.content_hash, ps.updated_at = content_hash, utcnow()
+        if title:
+            ps.title = title
         s.merge(ps)
         s.commit()
 
@@ -127,9 +130,10 @@ def handle_item(*, partner: Partner, site: Site, r, url: str, title: str, text: 
             collection=partner.collection or load_profiles()[partner.profile].collection,
             url=url, title=title or url, depth=Depth.full,
             sections=sections or [Section(heading=title or url, heading_tag="h1", text=text)]))
-        _touch_page_stat(url, site.id, content_hash)
+        _touch_page_stat(url, site.id, content_hash, title or None)
     elif d.action == "archive":
-        archive_page(url, site.id, text, content_hash)
+        archive_page(url, site.id, text, content_hash,
+                     title=title or None, sections=sections)
     log.debug("%s -> %s (%s)", url, d.action, d.reason)
     return d.action
 

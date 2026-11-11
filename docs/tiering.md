@@ -5,8 +5,8 @@ S3-storage-class-style lifecycle for partner content in Qdrant. Partner sites
 for. Goal: store hot content fully so vector search finds it, park cold
 content where it costs ~10x less, without losing it.
 
-Status: build order 1-6 done (tiering, indexer handlers, feed watcher,
-tier bot, tierctl, backfill). See checkboxes below.
+Status: build order 1-7 done (tiering, indexer handlers, feed watcher,
+tier bot, tierctl, backfill, keyword search + restore). See checkboxes below.
 
 ## Tiers
 
@@ -217,6 +217,40 @@ config:
   accepted and kept), then code the meaning — a field on `TierConfig` plus
   its use in `heat()` / `target_tier()`. No call site changes.
 
+## Search (build order 7)
+
+The search server's tiering slice: vaulted pages must stay reachable even
+though their vectors are gone. Two parts.
+
+**Keyword fallback** — `search/keyword.py`, `keyword_search(query,
+partner, limit)`. A pure DB query (no network): term matching over
+`page_stats` (t0-t2) and the vault (t3 rows + `page_archives`), weighted
+url 3.0 > title 2.0 > text 1.0 per distinct matched term, sorted by score,
+then heat. A URL in both tables is reported once, labelled by its tier: a
+`t3` page comes back as `source: "vault"` with a snippet cut from the
+archived copy (or the title, when the term hits the title only); a t0-t2
+page as `source: "indexed"`. `partner` filters by domain. This is what
+`/search` uses for vaulted hits alongside the vector fan-out (the full
+pipeline — Qdrant + CSE/Bing + cross-encoder — lands with the rest of the
+search server).
+
+**Restore** — `tierbot.restore_page(url, to_tier)`. Reads the cold copy
+from `page_archives` (no live fetch — the page may be gone upstream),
+re-publishes a `PromoteMsg` with the exact archived sections at the target
+tier, and re-creates the `page_stats` row. The archive row is kept as the
+cold copy. Returns `restored` / `no_archive`. The tier bot holds the
+restored page on its next pass via the dwell gate; heat re-tiers it from
+there.
+
+Entry points: `search/app.py` (`/search?q=&partner=&limit=`,
+`/restore?url=&tier=`) and `tierctl restore URL [--tier t0|t1|t2]`.
+
+Schema notes (this step): `page_stats.title` (stamped at index/transition
+time — keyword search matches on it), `page_archives.title` +
+`page_archives.sections` (the exact archived sections, so restore re-embeds
+without a fetch), and `archive_page()` is now an upsert — re-demoting a
+changed page refreshes the cold copy.
+
 ## Build order
 
 - [x] 1. Schema: `partners` table, `page_stats` tier fields (impressions,
@@ -234,8 +268,9 @@ config:
       `evaluate_pass`, promote/demote run the bot's pipeline)
 - [x] 6. Backfill job: onboarding crawl with the ingest gate
       (`crawler/backfill.py`, `tests/test_backfill.py`)
-- [ ] 7. Search side: keyword fallback over page_stats/page_archives so t3
-      pages stay reachable, with a restore action
+- [x] 7. Search side: keyword fallback over page_stats/page_archives so t3
+      pages stay reachable, with a restore action (`search/`,
+      `tierbot.restore_page`, `tests/test_keyword.py`)
 - [ ] 8. Metrics: pages per tier per partner, storage per tier, transition
       rate, restore latency
 
@@ -257,6 +292,9 @@ tierctl config [DOMAIN]              effective tiering parameters,
 tierctl promote URL [--tier t0|t1|t2]
 tierctl demote URL                   manual transition, same code path as
                                      the bot
+tierctl restore URL [--tier t0|t1|t2] restore a vaulted page from
+                                     page_archives (re-embeds the archived
+                                     copy, no live fetch)
 ```
 
 It calls the same `shared/tiers.py` functions as the bot, so what you see is
@@ -273,6 +311,10 @@ ALTER TABLE page_stats ADD COLUMN tier VARCHAR(8) NOT NULL DEFAULT 't0';
 ALTER TABLE page_stats ADD COLUMN heat DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE page_stats ADD COLUMN last_accessed_at TIMESTAMPTZ;
 ALTER TABLE page_stats ADD COLUMN last_tier_change TIMESTAMPTZ;
+ALTER TABLE page_stats ADD COLUMN title VARCHAR(2048);
+-- only if page_archives already existed from an earlier deployment:
+ALTER TABLE page_archives ADD COLUMN title VARCHAR(2048);
+ALTER TABLE page_archives ADD COLUMN sections JSON;
 ```
 
 Existing Qdrant points have no `metadata.tier`: treat as t0 until the tier

@@ -1,0 +1,4 @@
+{
+  "extraPaths": ["."],
+  "include": ["crawler", "indexer", "search", "shared", "cli", "tests"]
+}
