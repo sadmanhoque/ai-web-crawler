@@ -10,6 +10,7 @@ Usage (from anywhere; needs DATABASE_URL, crawler side):
     python3 cli/tierctl.py heat URL
     python3 cli/tierctl.py dry-run [--partner DOMAIN]
     python3 cli/tierctl.py transitions [--since 24h]
+    python3 cli/tierctl.py config [DOMAIN]        # effective tiering parameters
     python3 cli/tierctl.py promote URL [--tier t0|t1|t2]   # one step up, or jump to --tier
     python3 cli/tierctl.py demote URL                       # one step down
 """
@@ -43,7 +44,7 @@ def _parse_since(s: str) -> float:
 
 def _partner_cfg(PageStat, Site, Partner, SessionLocal, url=None):
     """(Partner | None, TierConfig) for one URL, or defaults when not a partner."""
-    from shared.tiers import TierConfig
+    from shared.tiers import tier_config_for
     db = SessionLocal()
     if url:
         row = db.query(Site, Partner).outerjoin(
@@ -55,8 +56,7 @@ def _partner_cfg(PageStat, Site, Partner, SessionLocal, url=None):
         site, partner = row[0], row[1]
     else:
         site, partner = None, None
-    cfg = TierConfig(**(partner.tier_config or {})) if partner and partner.tier_config \
-        else TierConfig()
+    cfg = tier_config_for(partner)
     db.close()
     return partner, cfg
 
@@ -74,7 +74,7 @@ def _rows(PageStat, Site, SessionLocal, partner_domain=None):
 def _score_and_target(PageStat, Site, Partner, SessionLocal, ps, site, now=None):
     """Mirror the tier bot's per-page evaluation: (heat, target_tier, reason, dwell_ok)."""
     from datetime import datetime, timezone
-    from shared.tiers import Tier, TierConfig, heat, target_tier
+    from shared.tiers import Tier, heat, target_tier, tier_config_for
     now = now or datetime.now(timezone.utc)
 
     partner = None
@@ -83,13 +83,56 @@ def _score_and_target(PageStat, Site, Partner, SessionLocal, ps, site, now=None)
         partner = db.query(Partner).filter(
             Partner.domain == site.domain, Partner.enabled.is_(True)).first()
         db.close()
-    cfg = TierConfig(**(partner.tier_config or {})) if partner and partner.tier_config \
-        else TierConfig()
+    cfg = tier_config_for(partner)
     score = heat(ps.hits, ps.impressions, ps.last_accessed_at, cfg.half_life_days,
                  cfg.view_weight, cfg.impression_weight, now=now)
     current = Tier(ps.tier)
     target, reason = target_tier(score, current, cfg, ps.last_tier_change, now=now)
     return score, target, reason
+
+
+def cmd_config(args):
+    """Effective tiering parameters and where each one comes from.
+    No argument: the file's defaults block + declared partner blocks.
+    With a domain: the effective per-partner config, per-parameter provenance
+    (file partner block > DB column > file defaults) and any DB/file drift."""
+    from shared.tiers import TierConfig, load_tiers_file, tier_config_for
+    tf = load_tiers_file()
+    print(f"config file:      {tf.path}")
+    names = list(TierConfig.model_fields)
+    if not args.partner:
+        defaults = TierConfig(**tf.defaults_raw)
+        print("\neffective defaults (every partner):")
+        for k in names:
+            print(f"  {k:<20} {getattr(defaults, k)}")
+        declared = sorted(tf.partners)
+        print(f"\ndeclared partner blocks: {', '.join(declared) if declared else '(none — all partners use defaults)'}")
+        return
+    _, _, Partner, _, SessionLocal = _db()
+    db = SessionLocal()
+    partner = db.query(Partner).filter(Partner.domain == args.partner).first()
+    db.close()
+    if not partner:
+        sys.exit(f"no partner for domain {args.partner!r}")
+    eff = tier_config_for(partner, tf)
+    block = tf.partners.get(args.partner, {})
+    dbcfg = partner.tier_config or {}
+    print(f"\npartner {args.partner} — effective config:")
+    for k in names:
+        if k in block:
+            src = "file: partner block"
+        elif k in dbcfg:
+            src = "db: partners.tier_config"
+        else:
+            src = "file: defaults"
+        print(f"  {k:<20} {getattr(eff, k):<10} [{src}]")
+    drift = [(k, dbcfg[k], block[k]) for k in dbcfg if k in block and dbcfg[k] != block[k]]
+    if drift:
+        for k, dbv, fv in drift:
+            print(f"  drift: {k} — db says {dbv}, file says {fv} (file wins)")
+    if partner.tier_config and not block:
+        print("  note: this partner has no file block; its DB overrides apply "
+              "until a block is declared in the file")
 
 
 def cmd_status(args):
@@ -147,8 +190,8 @@ def cmd_heat(args):
     partner = db.query(Partner).filter(Partner.domain == site.domain).first() if site else None
     db.close()
     score, target, reason = _score_and_target(PageStat, Site, Partner, SessionLocal, ps, site)
-    from shared.tiers import TierConfig, as_utc
-    cfg = TierConfig(**(partner.tier_config or {})) if partner and partner.tier_config else TierConfig()
+    from shared.tiers import as_utc, tier_config_for
+    cfg = tier_config_for(partner)
     la = as_utc(ps.last_accessed_at)
     idle = None
     if la:
@@ -168,7 +211,7 @@ def cmd_heat(args):
 def cmd_dry_run(args):
     PageStat, Site, Partner, PageArchive, SessionLocal = _db()
     from datetime import datetime, timezone
-    from shared.tiers import Tier, TierConfig, heat, target_tier
+    from shared.tiers import Tier, heat, target_tier, tier_config_for
     now = datetime.now(timezone.utc)
     db = SessionLocal()
     # exactly the rows evaluate_pass sees (enabled partners only)
@@ -182,7 +225,7 @@ def cmd_dry_run(args):
     db.close()
     planned = []
     for ps, site, partner in rows:
-        cfg = TierConfig(**(partner.tier_config or {}))
+        cfg = tier_config_for(partner)
         score = heat(ps.hits, ps.impressions, ps.last_accessed_at,
                      cfg.half_life_days, cfg.view_weight, cfg.impression_weight, now=now)
         target, reason = target_tier(score, Tier(ps.tier), cfg, ps.last_tier_change, now=now)
@@ -216,7 +259,7 @@ def _manual(name: str, args):
     message, page_stats update."""
     PageStat, Site, Partner, PageArchive, SessionLocal = _db()
     from shared.messages import get_redis
-    from shared.tiers import TIER_ORDER, Tier, TierConfig, heat
+    from shared.tiers import TIER_ORDER, Tier, heat, tier_config_for
     from crawler.tierbot import transition_page
     db = SessionLocal()
     ps = db.query(PageStat).filter(PageStat.url == args.url).first()
@@ -230,7 +273,7 @@ def _manual(name: str, args):
                if site else None)
     if not partner:
         sys.exit("no enabled partner for this page (tiering is partner-only)")
-    cfg = TierConfig(**(partner.tier_config or {}))
+    cfg = tier_config_for(partner)
     score = heat(ps.hits, ps.impressions, ps.last_accessed_at,
                  cfg.half_life_days, cfg.view_weight, cfg.impression_weight)
     cur = Tier(ps.tier)
@@ -277,6 +320,10 @@ def main():
     p = sub.add_parser("transitions", help="recent tier changes")
     p.add_argument("--since", default="24h", help="window: 90m / 24h / 7d (default 24h)")
     p.set_defaults(fn=cmd_transitions)
+
+    p = sub.add_parser("config", help="effective tiering parameters + provenance")
+    p.add_argument("partner", nargs="?", help="partner domain (omit for file defaults)")
+    p.set_defaults(fn=cmd_config)
 
     p = sub.add_parser("promote", help="manual promote: one step up, or jump to --tier")
     p.add_argument("url")

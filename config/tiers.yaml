@@ -1,0 +1,62 @@
+# ============================================================================
+# Tiering configuration — declarative, one block per declaration
+# (terraform-style: the file is the source of truth for the tiering process).
+#
+#   block `defaults` (exactly one)  : parameters that apply to every partner
+#   block `partner`  (zero or more) : per-partner parameters, matched by
+#                                     `domain` against partners.domain
+#
+# Precedence (highest wins):
+#   1. this file, the partner block for the domain
+#   2. the DB column partners.tier_config (per-deployment, transient)
+#   3. this file, the defaults block
+#
+# Like `terraform apply` over drifted state: if a parameter is set in BOTH
+# the file and the DB column, the file wins — the DB column is only a
+# temporary per-deployment override. `tierctl config <domain>` shows the
+# effective values, where each one came from, and any such drift.
+#
+# Adding a new parameter (the future-optimization workflow):
+#   1. add the key to a block below, with its intended value. Unknown keys
+#      are accepted and kept, so this file can run ahead of the code.
+#   2. code its meaning: a field on shared/tiers.py::TierConfig, then read
+#      it in heat() / target_tier(). No call sites change.
+#
+# Current parameters (see shared/tiers.py for the formulas):
+#   view_weight         weight of one actual page open (in heat units)
+#   impression_weight   weight of one result-set / AI-citation appearance
+#   half_life_days      heat decays to half after this many idle days
+#   min_dwell_days      min time in a tier before an automatic demotion
+#   t0_floor            demote t0 -> t1 when heat drops below this
+#   t1_floor            demote t1 -> t2 when heat drops below this
+#   t2_floor            demote t2 -> t3 (vault) when heat drops below this
+#   t2_promote          promote t3 -> t2 when heat reaches this
+#   t1_promote          promote t2 -> t1 when heat reaches this
+#   t0_promote          promote t1 -> t0 when heat reaches this
+# ============================================================================
+
+config:
+  - type: defaults
+    view_weight: 1.0
+    impression_weight: 0.1
+    half_life_days: 14
+    min_dwell_days: 14
+    t0_floor: 20
+    t1_floor: 5
+    t2_floor: 1
+    t2_promote: 10
+    t1_promote: 25
+    t0_promote: 60
+
+  # Per-partner blocks: declare only what differs from defaults.
+  #
+  # - type: partner
+  #   domain: example.com        # matches partners.domain exactly
+  #   half_life_days: 90         # reference content decays slowly
+  #   min_dwell_days: 30         # ...and moves tiers less often
+  #   t2_floor: 2
+
+# --- future parameters: write the intent here first, code the meaning later ---
+#   views_per_month_t1: 100      # e.g. t1 pages with < 100 views/month -> t2
+#   stale_archive_days: 90       # e.g. archive t2 pages untouched for 90 days
+#   max_pages_t0: 500            # e.g. cap how many t0 pages one partner holds

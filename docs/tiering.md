@@ -5,8 +5,8 @@ S3-storage-class-style lifecycle for partner content in Qdrant. Partner sites
 for. Goal: store hot content fully so vector search finds it, park cold
 content where it costs ~10x less, without losing it.
 
-Status: build order 1-5 done (tiering, indexer handlers, feed watcher,
-tier bot, tierctl). See checkboxes below.
+Status: build order 1-6 done (tiering, indexer handlers, feed watcher,
+tier bot, tierctl, backfill). See checkboxes below.
 
 ## Tiers
 
@@ -36,8 +36,9 @@ heat(page) = (hits * view_weight + impressions * impression_weight)
 - impressions = times the page appeared in a served result set or AI summary
   (`page_stats.impressions`, fed by the search server alongside POST /hits)
 - idle_days = now - last_accessed_at; never accessed -> heat 0
-- half_life_days: profile default (news ~14d, reference months), per-partner
-  override in `partners.tier_config`
+- half_life_days: default in `config/tiers.yaml` (news ~14d, reference
+  months), per-partner block in the same file, transient override in
+  `partners.tier_config`
 
 A fresh page starts at t0 by default and decays if nobody touches it; pages
 with interest climb back up.
@@ -143,8 +144,8 @@ disable, `TIER_EVAL_MINUTES` for the interval, default 60). Each pass
 (`evaluate_pass`) evaluates every page of every enabled partner — exactly the
 rows tierctl's dry-run inspects:
 
-1. **compute heat** with the page's partner `TierConfig` (per-partner
-   overrides in `partners.tier_config`, defaults in `shared/tiers.py`)
+1. **compute heat** with the page's partner `TierConfig` (effective config
+   from `config/tiers.yaml`, see the Config section below)
 2. **decide** via `shared.tiers.target_tier` (one step per pass, dwell gate
    on demote, hysteresis floors/thresholds)
 3. **fetch the page** — archive text and re-embed sections must come from a
@@ -171,6 +172,51 @@ instead of demoting a hot page.
 (fetch, archive, message, page_stats) — the operator just overrides the
 dwell gate and heat thresholds (one step, or `--tier` to jump).
 
+## Backfill (build order 6)
+
+`crawler/backfill.py` is the onboarding job: one full-site crawl for a new
+partner, through the exact same gate + adapters as the feed watcher
+(`poll_crawl`). Recent pages index at t0, pages older than the partner's
+`backfill_cutoff_days` go straight to the t3 vault, thin/boilerplate/
+duplicate pages are skipped — so a 20-year archive costs metadata, not
+vectors.
+
+```
+python -m crawler.backfill --domain example.com [--max-pages N]
+```
+
+- The partner row is onboarded manually first (domain, profile, feed_type,
+  backfill_cutoff_days); the `sites` row is linked lazily on first run.
+- Idempotent: the gate's unchanged/duplicate/already-archived checks make a
+  re-run a no-op, safe for re-pointing a partner and crawling again.
+- Hand-off: `partner.last_poll_at` is seeded to now when the crawl
+  finishes, so the feed watcher takes over without re-crawling the site.
+
+## Config (config/tiers.yaml)
+
+All tiering parameters live in one declarative file, terraform-style: one
+block per declaration, the file is the source of truth.
+
+```yaml
+config:
+  - type: defaults          # applies to every partner
+    view_weight: 1.0
+    ...
+  - type: partner           # per-partner, matched on partners.domain
+    domain: example.com     # declare only what differs from defaults
+    half_life_days: 90
+```
+
+- Precedence (highest wins): file partner block > `partners.tier_config`
+  DB column > file defaults. The DB column stays as a temporary
+  per-deployment override; when it and the file disagree, the file wins
+  (like `apply` over drifted state).
+- `tierctl config [DOMAIN]` shows the effective values, where each one came
+  from, and any DB/file drift.
+- Adding a new parameter: put the key in the file first (unknown keys are
+  accepted and kept), then code the meaning — a field on `TierConfig` plus
+  its use in `heat()` / `target_tier()`. No call site changes.
+
 ## Build order
 
 - [x] 1. Schema: `partners` table, `page_stats` tier fields (impressions,
@@ -186,7 +232,8 @@ dwell gate and heat thresholds (one step, or `--tier` to jump).
       page_stats updates (`crawler/tierbot.py`, `tests/test_tierbot.py`)
 - [x] 5. tierctl CLI: monitoring/debug (`cli/tierctl.py`; dry-run mirrors
       `evaluate_pass`, promote/demote run the bot's pipeline)
-- [ ] 6. Backfill job: onboarding crawl with the ingest gate
+- [x] 6. Backfill job: onboarding crawl with the ingest gate
+      (`crawler/backfill.py`, `tests/test_backfill.py`)
 - [ ] 7. Search side: keyword fallback over page_stats/page_archives so t3
       pages stay reachable, with a restore action
 - [ ] 8. Metrics: pages per tier per partner, storage per tier, transition
@@ -205,6 +252,8 @@ tierctl dry-run [--partner DOMAIN]   evaluate partner pages (the same rows
                                      the bot sees), list planned
                                      transitions, apply nothing
 tierctl transitions [--since 24h]    recent tier changes
+tierctl config [DOMAIN]              effective tiering parameters,
+                                     per-parameter provenance + drift
 tierctl promote URL [--tier t0|t1|t2]
 tierctl demote URL                   manual transition, same code path as
                                      the bot

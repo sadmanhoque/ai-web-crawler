@@ -5,9 +5,14 @@ the tier, the cheaper to store and the less findable by vector search.
 All transition decisions live here so the tier bot, the indexer and the
 tierctl CLI share one implementation (see docs/tiering.md).
 """
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from pydantic import BaseModel
+from pathlib import Path
+from pydantic import BaseModel, ConfigDict
 
 
 class Tier(str, Enum):
@@ -32,7 +37,12 @@ def tier_for_depth(depth: str) -> Tier:
 
 
 class TierConfig(BaseModel):
-    """Per-partner overrides (partners.tier_config); defaults below."""
+    """Per-partner overrides; the declarative source is config/tiers.yaml
+    (see load_tiers_file / tier_config_for below)."""
+    # Future parameters: the file may declare keys the code does not read
+    # yet; they are kept (extra="allow"), never rejected.
+    model_config = ConfigDict(extra="allow")
+
     half_life_days: float = 14.0      # heat decay: 0.5 ** (idle_days / half_life)
     min_dwell_days: float = 14.0      # min time in a tier before auto-DEMOTE
                                       # (promotion is exempt)
@@ -46,6 +56,58 @@ class TierConfig(BaseModel):
     t2_promote: float = 10.0          # promote t3->t2 when heat >= t2_promote
     t1_promote: float = 25.0          # promote t2->t1 when heat >= t1_promote
     t0_promote: float = 60.0          # promote t1->t0 when heat >= t0_promote
+
+
+@dataclass
+class TieringFile:
+    """Parsed config/tiers.yaml: raw (key, value) blocks, pre-merge.
+    Raw dicts are kept so future keys the code does not read yet survive
+    the merge untouched."""
+    defaults_raw: dict
+    partners: dict[str, dict]    # domain -> declared params
+    path: str
+
+
+def load_tiers_file(path: str | None = None) -> TieringFile:
+    """Read the declarative tiering config (TIERS_FILE env, else the repo's
+    config/tiers.yaml). A missing file falls back to TierConfig() defaults
+    so deployments that predate the file keep working."""
+    p = path or os.getenv("TIERS_FILE") \
+        or str(Path(__file__).resolve().parent.parent / "config" / "tiers.yaml")
+    if not os.path.exists(p):
+        return TieringFile(defaults_raw=dict(TierConfig().model_dump()),
+                           partners={}, path=p)
+    import yaml
+    data = yaml.safe_load(open(p)) or {}
+    defaults_raw: dict = {}
+    partners: dict[str, dict] = {}
+    for block in data.get("config", []):
+        kind = block.get("type")
+        if kind == "defaults":
+            defaults_raw = {k: v for k, v in block.items() if k != "type"}
+        elif kind == "partner":
+            dom = block.get("domain")
+            if dom:
+                partners[str(dom)] = {k: v for k, v in block.items()
+                                      if k not in ("type", "domain")}
+        # other block types: ignored for now (future)
+    return TieringFile(defaults_raw=defaults_raw, partners=partners, path=p)
+
+
+def tier_config_for(partner, tf: TieringFile | None = None) -> TierConfig:
+    """Effective TierConfig for one partner row.
+    Precedence (highest wins): file partner block > partners.tier_config DB
+    column > file defaults. The file is the source of truth (terraform-style):
+    when it and the DB column disagree, the file wins; tierctl config shows
+    the drift."""
+    tf = tf or load_tiers_file()
+    merged = dict(tf.defaults_raw)
+    if partner is not None:
+        if partner.tier_config:
+            merged.update(partner.tier_config)
+        if partner.domain:
+            merged.update(tf.partners.get(partner.domain, {}))
+    return TierConfig(**merged)
 
 
 def as_utc(dt: datetime | None) -> datetime | None:

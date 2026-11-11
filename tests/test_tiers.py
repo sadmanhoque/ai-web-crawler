@@ -65,6 +65,60 @@ def main():
     assert "floor" in reason, reason
     print("ok  reason text")
 
+    # --- declarative config (config/tiers.yaml) ---
+    import tempfile, types
+    from shared.tiers import load_tiers_file, tier_config_for
+
+    tf = load_tiers_file()
+    check("repo file loads", os.path.exists(tf.path), True)
+    check("file defaults == code defaults (no behavior change)",
+          TierConfig(**tf.defaults_raw), TierConfig())
+    check("no partner blocks in the shipped file", tf.partners, {})
+
+    yaml = """
+config:
+  - type: defaults
+    half_life_days: 10
+    t2_floor: 2
+  - type: partner
+    domain: slow.example
+    half_life_days: 90
+    t2_floor: 4
+    views_per_month_t1: 100
+"""
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        f.write(yaml)
+        tmp = f.name
+    tft = load_tiers_file(tmp)
+    os.remove(tmp)
+    check("defaults block parsed", tft.defaults_raw.get("half_life_days"), 10)
+    check("partner block parsed", tft.partners.get("slow.example", {}).get("t2_floor"), 4)
+
+    plain = types.SimpleNamespace(domain="plain.example", tier_config=None)
+    db_only = types.SimpleNamespace(domain="plain.example",
+                                    tier_config={"min_dwell_days": 30})
+    drift = types.SimpleNamespace(domain="slow.example",
+                                  tier_config={"half_life_days": 30, "t0_floor": 7})
+
+    check("no partner -> file defaults", tier_config_for(plain, tft).half_life_days, 10.0)
+    check("partner None -> file defaults", tier_config_for(None, tft).half_life_days, 10.0)
+    check("db column applies when no file block",
+          tier_config_for(db_only, tft).min_dwell_days, 30.0)
+    check("db column fills keys the file block lacks",
+          tier_config_for(drift, tft).t0_floor, 7.0)
+    check("file block wins over db column (terraform)",
+          tier_config_for(drift, tft).half_life_days, 90.0)
+    check("file block value used by the logic",
+          target_tier(3.5, Tier.t2, tier_config_for(drift, tft), old, NOW)[0], Tier.t3)
+    eff = tier_config_for(drift, tft)
+    check("future key kept, not rejected", getattr(eff, "views_per_month_t1", None), 100)
+    check("future key does not change heat",
+          round(heat(10, 100, NOW - timedelta(days=10), eff.half_life_days, now=NOW), 9),
+          round((10 * 1.0 + 100 * 0.1) * 0.5 ** (10 / 90), 9))
+
+    check("missing file falls back to code defaults",
+          load_tiers_file("/nonexistent/tiers.yaml").defaults_raw.get("half_life_days"), 14.0)
+
     print("all tier tests passed")
 
 

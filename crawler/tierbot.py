@@ -29,7 +29,7 @@ from bs4 import BeautifulSoup
 from shared.config import load_profiles
 from shared.extract import extract_headline, extract_sections
 from shared.messages import DemoteMsg, PromoteMsg, Section, get_redis, publish
-from shared.tiers import TIER_ORDER, Tier, TierConfig, heat, target_tier
+from shared.tiers import TIER_ORDER, Tier, heat, target_tier, tier_config_for
 from .db import PageStat, Partner, SessionLocal, Site, archive_page, utcnow
 from .fetch import TIMEOUT, UA
 
@@ -117,7 +117,7 @@ def evaluate_pass(r, now=None, partner_domain: str | None = None) -> dict:
             q = q.filter(Partner.domain == partner_domain)
         for ps, site, p in q.all():
             stats["evaluated"] += 1
-            cfg = TierConfig(**(p.tier_config or {}))
+            cfg = tier_config_for(p)
             score = heat(ps.hits, ps.impressions, ps.last_accessed_at,
                          cfg.half_life_days, cfg.view_weight, cfg.impression_weight, now=now)
             current = Tier(ps.tier)
