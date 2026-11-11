@@ -1,0 +1,24 @@
+# Smoke-test fast-forward config (docs/smoke-testing.md, section 5).
+# Same parameters as config/tiers.yaml, with decay and dwell shrunk so the
+# whole tiering lifecycle (heat decay -> demote cascade -> vault -> promote
+# back) completes in minutes instead of weeks.
+#
+# Use it by starting the crawler with:
+#   TIERS_FILE=config/smoke-fast.yaml TIER_EVAL_MINUTES=1 uvicorn crawler.app:app
+#
+# Do NOT commit this as the production tiers.yaml: the production defaults
+# (14-day half-life, 14-day min dwell) are correct for production.
+
+config:
+  - type: defaults
+    view_weight: 1.0
+    impression_weight: 0.1
+    half_life_days: 0.02        # ~29 minutes: one idle hour halves the heat
+    min_dwell_days: 0.0017      # ~2.5 minutes: anti-flapping gate, short
+                                # enough that the first pass can act
+    t0_floor: 20
+    t1_floor: 5
+    t2_floor: 1
+    t2_promote: 10
+    t1_promote: 25
+    t0_promote: 60

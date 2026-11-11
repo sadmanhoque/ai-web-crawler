@@ -5,8 +5,8 @@ S3-storage-class-style lifecycle for partner content in Qdrant. Partner sites
 for. Goal: store hot content fully so vector search finds it, park cold
 content where it costs ~10x less, without losing it.
 
-Status: build order 1-7 done (tiering, indexer handlers, feed watcher,
-tier bot, tierctl, backfill, keyword search + restore). See checkboxes below.
+Status: build order 1-8 done (tiering, indexer handlers, feed watcher,
+tier bot, tierctl, backfill, keyword search + restore, metrics). See checkboxes below.
 
 ## Tiers
 
@@ -251,6 +251,59 @@ time — keyword search matches on it), `page_archives.title` +
 without a fetch), and `archive_page()` is now an upsert — re-demoting a
 changed page refreshes the cold copy.
 
+## Metrics (build order 8)
+
+The system keeps an append-only audit log, `tier_events` (`crawler/db.py::
+TierEvent`): one row per applied action — `promote` / `demote` (via `auto`
+tier bot or `manual` tierctl), `restore` (with `dwell_hours` = time the page
+spent in the vault, i.e. restore latency), and `archive` (pages sent
+straight to the vault at ingest). Every applied transition writes one;
+holds, no-ops and failed fetches write nothing. Nothing is ever updated or
+deleted in the table.
+
+`tierctl metrics [--partner DOMAIN] [--since 30d]` reports:
+
+- **pages per tier per partner** + estimated storage (current state,
+  `page_stats`; ~9/3/3.5/0.5 KB per page at t0/t1/t2/t3)
+- **storage per tier** across all partners
+- **transition rate**: per-kind counts (auto vs manual) and events/day over
+  the window
+- **restore latency**: min / median / max vault time over the window
+- **vault depth**: cold-copy count, median and oldest age (`page_archives`)
+
+`tierctl transitions [--since 24h]` now reads the same log (full history,
+newest first) instead of each page's `last_tier_change`.
+
+## Web search integration (CSE / Bing)
+
+The search leg runs two union sources in parallel with the partner index:
+keyword/vector over `page_stats` + `page_archives`, and live web search for
+content no partner covers. The web provider is deliberately not decided
+yet — Google Custom Search and Bing Web Search are interchangeable behind
+one interface (`search/web.py`):
+
+- `web_search(query, provider, num)` -> `list[WebHit]` — one hit shape
+  (title, url, snippet, source) regardless of provider
+- provider picked per-call or via `WEB_SEARCH_PROVIDER` (default `google`);
+  keys: `CSE_API_KEY` + `CSE_CX` (Google) or `BING_API_KEY` (Bing)
+- missing/empty key -> `ValueError` (misconfiguration, 400); upstream 403/
+  429/5xx -> `WebSearchError` (transient, 502) so the union pipeline drops
+  that leg for the query instead of failing it
+- exposed as `GET /web?q=&provider=&num=` on the search app
+- `tests/test_web.py` covers request construction, parsing, dispatch and
+  failure paths offline (stubbed HTTP, no keys needed)
+
+## Smoke testing (verification checklist)
+
+`docs/smoke-testing.md` is the end-to-end verification pass for the
+tiering system: a fixture partner (`scripts/smoke_server.py`, 7 pages with
+controlled publication dates exercising every ingest-gate outcome), traffic
+simulation through `POST /hits` (views vs impressions vs sustained loops),
+and the full demote -> vault -> restore cycle on a fast-forward config
+(`config/smoke-fast.yaml`: ~29-min half-life, ~2.5-min dwell, so the whole
+lifecycle completes in minutes instead of weeks). Section 9 of the same
+doc walks the live web-search leg for both providers.
+
 ## Build order
 
 - [x] 1. Schema: `partners` table, `page_stats` tier fields (impressions,
@@ -271,8 +324,8 @@ changed page refreshes the cold copy.
 - [x] 7. Search side: keyword fallback over page_stats/page_archives so t3
       pages stay reachable, with a restore action (`search/`,
       `tierbot.restore_page`, `tests/test_keyword.py`)
-- [ ] 8. Metrics: pages per tier per partner, storage per tier, transition
-      rate, restore latency
+- [x] 8. Metrics: pages per tier per partner, storage per tier, transition
+      rate, restore latency (`tier_events` log, `tierctl metrics`)
 
 ## tierctl (build order 5)
 
@@ -286,7 +339,10 @@ tierctl heat URL                     hits/impressions/idle/decay, computed
 tierctl dry-run [--partner DOMAIN]   evaluate partner pages (the same rows
                                      the bot sees), list planned
                                      transitions, apply nothing
-tierctl transitions [--since 24h]    recent tier changes
+tierctl transitions [--since 24h]    recent tier events (the tier_events
+                                     log, newest first)
+tierctl metrics [--partner DOMAIN]   pages/storage per tier, transition
+  [--since 30d]                        rate, restore latency, vault depth
 tierctl config [DOMAIN]              effective tiering parameters,
                                      per-parameter provenance + drift
 tierctl promote URL [--tier t0|t1|t2]
@@ -303,7 +359,8 @@ what will happen.
 ## Migration notes (existing deployment)
 
 No alembic in this repo: `create_all` makes the new tables (`partners`,
-`page_archives`) on next startup, but the existing `page_stats` table needs:
+`page_archives`, `tier_events`) on next startup, but the existing
+`page_stats` table needs:
 
 ```sql
 ALTER TABLE page_stats ADD COLUMN impressions INTEGER NOT NULL DEFAULT 0;
@@ -328,3 +385,7 @@ bot's first pass rewrites or removes them. Existing collections get the
 - per-partner collection naming (`partners.collection` NULL = share the
   profile's collection)
 - impression logging endpoint (search server side, alongside /hits)
+- web search provider choice (Google CSE vs Bing) — code is provider-
+  neutral; the decision is an env var, not a code change
+- smoke runbook live sections (1-8, 9) need a real run against the shared
+  Postgres/Redis stack with API keys to certify

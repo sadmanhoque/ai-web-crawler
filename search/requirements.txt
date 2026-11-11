@@ -4,3 +4,4 @@ sqlalchemy>=2
 psycopg[binary]
 pydantic>=2
 redis
+requests
