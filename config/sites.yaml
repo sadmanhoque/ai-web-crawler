@@ -17,12 +17,3 @@ sites:
       - {prefix: /wiki/Special, depth: headline}
     run_hour_utc: 15
     run_minute_utc: 0
-
-# Cloudflare Radar discovery (POST /admin/sync-radar, run daily by a CronJob)
-radar:
-  limit: 100
-  default_profile: general
-  max_pages: 200
-  categories: []                  # e.g. [{name: Technology, domainCategory: Technology, profile: docs}]
-  denylist: [google.com, facebook.com, youtube.com, instagram.com, tiktok.com,
-             microsoft.com, apple.com, amazon.com, netflix.com, x.com, twitter.com]

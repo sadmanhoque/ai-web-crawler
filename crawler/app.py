@@ -9,7 +9,6 @@ from shared.config import load_profiles
 from shared.messages import Depth, MoveMsg, get_redis, publish
 from .db import PageArchive, PageStat, SessionLocal, Site, init_db, utcnow
 from .feedwatcher import feed_worker_loop
-from .radar import sync_radar
 from .registry import sync_manual, upsert_site
 from .scheduler import worker_loop
 from .tierbot import tier_worker_loop
@@ -141,7 +140,7 @@ def plan():
                  "collection": x.collection_override or profiles[x.profile].collection,
                  "depth": (x.depth_override or policy.auto_depth(x.visit_score).value),
                  "depth_source": "override" if x.depth_override else "auto",
-                 "path_rules": x.path_rules, "visit_score": round(x.visit_score, 3), "rank": x.rank,
+                 "path_rules": x.path_rules, "visit_score": round(x.visit_score, 3),
                  "interval_hours": x.interval_hours, "slot_utc": f"{x.run_hour_utc:02d}:{x.run_minute_utc:02d}",
                  "next_run_at": x.next_run_at, "last_status": x.last_status}
                 for x in s.execute(select(Site).order_by(Site.next_run_at)).scalars()]
@@ -178,12 +177,6 @@ def hits(batch: list[Hit]):
             s.merge(ps)
         s.commit()
     return {"ok": len(batch)}
-
-
-@api.post("/admin/sync-radar")
-def admin_radar():
-    with SessionLocal() as s:
-        return sync_radar(s)
 
 
 @api.post("/admin/sync-manual")

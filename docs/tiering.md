@@ -378,6 +378,14 @@ Existing Qdrant points have no `metadata.tier`: treat as t0 until the tier
 bot's first pass rewrites or removes them. Existing collections get the
 `metadata.source_url` payload index on indexer startup (best-effort).
 
+If the database predates the Cloudflare Radar removal, two `sites` columns
+are orphaned (optional to drop — the models no longer read or write them):
+
+```sql
+ALTER TABLE sites DROP COLUMN IF EXISTS rank;
+ALTER TABLE sites DROP COLUMN IF EXISTS category;
+```
+
 ## Open questions
 
 - `page_archives` in Postgres for v1; move cold text to object storage

@@ -27,8 +27,6 @@ spec:
               valueFrom: {secretKeyRef: {name: localmind-crawler-pg, key: database-url}}
             - name: ADMIN_TOKEN
               valueFrom: {secretKeyRef: {name: localmind-secrets, key: admin-token}}
-            - name: CLOUDFLARE_API_TOKEN
-              valueFrom: {secretKeyRef: {name: localmind-secrets, key: cloudflare-token}}
             - name: ANTHROPIC_API_KEY
               valueFrom: {secretKeyRef: {name: localmind-secrets, key: anthropic-key}}
           readinessProbe: {httpGet: {path: /healthz, port: 8000}}
@@ -54,22 +52,3 @@ spec:
   minReplicas: 1
   maxReplicas: 8
   metrics: [{type: Resource, resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}}]
----
-# Daily Cloudflare Radar discovery
-apiVersion: batch/v1
-kind: CronJob
-metadata: {name: localmind-radar-sync, namespace: localmind}
-spec:
-  schedule: "0 2 * * *"
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          restartPolicy: OnFailure
-          containers:
-            - name: curl
-              image: curlimages/curl
-              env:
-                - name: ADMIN_TOKEN
-                  valueFrom: {secretKeyRef: {name: localmind-secrets, key: admin-token}}
-              command: ["sh", "-c", "curl -fsS -X POST -H \"Authorization: Bearer $ADMIN_TOKEN\" http://localmind-crawler/admin/sync-radar"]

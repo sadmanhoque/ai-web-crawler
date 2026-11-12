@@ -1,10 +1,9 @@
 # LocalMind crawler + indexer + partner tiering
 
 ```
- Cloudflare Radar ─┐                        ┌────────────── Qdrant ──────────────┐
- sites.yaml ───────┼─► crawler/planner ──► Redis Stream ──► indexer (N replicas) ─► collections
- PATCH /sites/...  │   (Postgres registry,  index:events    chunk + embed + upsert   docs / encyclopedia / news / <site>
- POST /hits ───────┘   schedule, depth,
+ sites.yaml ───────┐                        ┌────────────── Qdrant ──────────────┐
+ PATCH /sites/...  ├─► crawler/planner ──► Redis Stream ──► indexer (N replicas) ─► collections
+ POST /hits ───────┘   (Postgres registry,  index:events    chunk + embed + upsert   docs / encyclopedia / news / <site>
  partner feeds ──────► feed watcher (crawl/rss/api) ─► ingest gate ──────────────┘
                           unchanged/boilerplate/thin -> skip, old -> t3 vault
  tier bot (scheduled, heat = decayed views + impressions)
@@ -21,11 +20,14 @@
   embedding config). Every point carries `metadata.site_id` / `metadata.domain` (payload-indexed), so a site
   can be filtered, deleted or moved at any time.
 - **Depth**: `headline` (title+h1+description) / `summary` (LLM, cached by content hash) / `full`.
-  Precedence: path_rules > depth_override > auto (visit_score from Radar rank and `/hits`; hot pages promoted a tier).
+  Precedence: path_rules > depth_override > auto (visit_score from `/hits`; hot pages promoted a tier).
 - **Schedule**: each site has `interval_hours` (24) and a UTC slot (`run_hour_utc:run_minute_utc`). New sites are
   assigned the least-loaded hour so crawls are staggered. `next_run_at` is stored in Postgres.
-- **Partner** (Postgres `partners`): a contracted content site, onboarding-managed, with `profile`, `feed_type`
-  (`crawl` / `rss` / `api`) and optional per-partner tiering overrides + its own Qdrant collection.
+- **Partner** (Postgres `partners`): a contracted content site with `profile`, `feed_type`
+  (`crawl` / `rss` / `api`), optional per-partner tiering overrides + its own Qdrant collection.
+  Onboarding is one row in `partners` (inserted by your own tooling — there is no API or script for it);
+  the feed watcher picks new rows up on its next tick and auto-creates the `sites` row, which starts
+  the crawl and the tiering lifecycle.
 - **Tiers** (S3-style storage classes, `docs/tiering.md`): lower tier = less findable by vector search.
   `t0` full -> `t1` lede -> `t2` one stub -> `t3` vault (no vectors; Postgres metadata + archived body,
   findable by keyword/title only). Pages enter at `t0` and move one step per evaluation, decided by **heat**:
@@ -44,7 +46,7 @@ PATCH /sites/{domain}                     e.g. {"interval_hours":3}  (time-sensi
 POST  /sites/{domain}/run-now             run at the next scheduler tick; normal schedule resumes after
 POST  /sites/{domain}/move                {"collection":"wikipedia_en"}  or {"collection":null} to go back to shared
 POST  /hits                               [{"url":..., "site_domain":..., "count":1, "impressions":0}]  from your search server
-POST  /admin/sync-radar | /admin/sync-manual
+POST  /admin/sync-manual
 ```
 `/hits` is the tiering signal: `count` = page opens (views), `impressions` = times served in a result set or an
 AI answer (AI-cited visits count). A first hit on a vaulted page re-creates its `page_stats` row **at t3**, not
@@ -93,7 +95,7 @@ tierctl config [D]                effective tiering params, per-parameter proven
 - Move copies vectors as-is (no re-embedding) then deletes from the source; the profile's embedding model must
   match the destination collection (checked).
 - Payload layout is `{"page_content", "metadata": {...}}` (LangChain-compatible). `aws_service` was dropped.
-- robots.txt is respected. Radar sites are crawled with a small page cap (default 200).
+- robots.txt is respected. Sites are crawled with a page cap (`max_pages`, default 200).
 - Tiering is S3-style (t0 full -> t3 vault) by visit heat: demote archives to `page_archives` **before**
   deleting vectors (crash in between = page both archived and indexed, harmless — the next pass re-demotes).
   A failed archive fetch skips the demote (page stays warm — safe default). Full design: `docs/tiering.md`.

@@ -10,10 +10,6 @@ PAGE_PROMOTE_HITS = int(os.getenv("PAGE_PROMOTE_HITS", "50"))
 ORDER = [Depth.headline, Depth.summary, Depth.full]
 
 
-def rank_score(rank: int | None) -> float:
-    return max(0.0, 1 - (rank - 1) / 100) if rank else 0.0     # rank 1 -> 1.0, rank 100 -> ~0
-
-
 def hit_score(total_hits: int) -> float:
     return min(1.0, total_hits / 1000)
 

@@ -38,7 +38,7 @@ def _refresh_score(site: Site):
     with SessionLocal() as s:
         total = s.execute(select(func.coalesce(func.sum(PageStat.hits), 0))
                           .where(PageStat.site_id == site.id)).scalar_one()
-        site.visit_score = max(policy.rank_score(site.rank), policy.hit_score(total))
+        site.visit_score = policy.hit_score(total)
         s.merge(site)
         s.commit()
 

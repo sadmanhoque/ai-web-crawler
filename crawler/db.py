@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timezone
-from sqlalchemy import JSON, DateTime, Float, String, Text, create_engine
+from sqlalchemy import JSON, DateTime, Float, String, Text, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
@@ -22,11 +22,9 @@ class Site(Base):
     start_url: Mapped[str] = mapped_column(String(2048))
     profile: Mapped[str] = mapped_column(String(64), default="general")
     collection_override: Mapped[str | None] = mapped_column(String(128), default=None)
-    source: Mapped[str] = mapped_column(String(16), default="manual")      # manual | radar
-    category: Mapped[str | None] = mapped_column(String(128), default=None)
+    source: Mapped[str] = mapped_column(String(16), default="manual")      # manual | partner
     enabled: Mapped[bool] = mapped_column(default=True)
     # --- popularity / depth ---
-    rank: Mapped[int | None] = mapped_column(default=None)                 # Cloudflare Radar rank
     visit_score: Mapped[float] = mapped_column(default=0.0)                # 0..1, recomputed per run
     depth_override: Mapped[str | None] = mapped_column(String(16), default=None)
     path_rules: Mapped[list] = mapped_column(JSON, default=list)           # [{"prefix","depth"}]
@@ -65,23 +63,32 @@ class PageStat(Base):
 
 class Partner(Base):
     """A partner website: the only sites we index into Qdrant and pay out for.
-    Manual onboarding; see docs/tiering.md."""
+    Manual onboarding — the row is inserted by external tooling (plain SQL),
+    so every column has a DATABASE-level default: a bare
+    `INSERT INTO partners (domain) VALUES (...)` must work. The feed watcher
+    picks the row up on its next tick and auto-creates the sites row.
+    See docs/tiering.md."""
     __tablename__ = "partners"
     id: Mapped[int] = mapped_column(primary_key=True)
     domain: Mapped[str] = mapped_column(String(255), unique=True)
-    profile: Mapped[str] = mapped_column(String(64), default="general")
+    profile: Mapped[str] = mapped_column(String(64), default="general",
+                                         server_default=text("'general'"))
     collection: Mapped[str | None] = mapped_column(String(128), default=None)  # None = profile's shared collection
     site_id: Mapped[int | None] = mapped_column(default=None)                  # link to the crawler's sites row
-    feed_type: Mapped[str] = mapped_column(String(16), default="crawl")        # crawl | rss | api
+    feed_type: Mapped[str] = mapped_column(String(16), default="crawl",
+                                           server_default=text("'crawl'"))      # crawl | rss | api
     feed_url: Mapped[str | None] = mapped_column(String(2048))
-    poll_interval_minutes: Mapped[int] = mapped_column(default=30)
-    backfill_cutoff_days: Mapped[int] = mapped_column(default=365)             # older pages skip vector indexing
-    tier_config: Mapped[dict] = mapped_column(JSON, default=dict)              # TierConfig overrides
-    enabled: Mapped[bool] = mapped_column(default=True)
+    poll_interval_minutes: Mapped[int] = mapped_column(default=30, server_default=text("30"))
+    backfill_cutoff_days: Mapped[int] = mapped_column(default=365, server_default=text("365"))
+    tier_config: Mapped[dict] = mapped_column(JSON, default=dict,
+                                              server_default=text("'{}'"))     # TierConfig overrides
+    enabled: Mapped[bool] = mapped_column(default=True, server_default=text("1"))
     last_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_status: Mapped[str | None] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow,
+                                                 server_default=text("CURRENT_TIMESTAMP"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow,
+                                                 server_default=text("CURRENT_TIMESTAMP"))
 
 
 class PageArchive(Base):
