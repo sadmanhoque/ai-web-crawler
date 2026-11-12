@@ -1,0 +1,3 @@
+the tiering.md has a formula for heat(page), basically a way to calculate how popular any webpage is
+    to decide the storage tier for it. But the description below the formula only shows what some of
+    it means.
