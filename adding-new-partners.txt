@@ -1,0 +1,76 @@
+This is just a rough document for now for the method to add new partner sites using psql commands.
+
+Frst step is to actually analyze and document, illustrate the DB structure on psql. Downside of vibe
+coding I just let the AI handle that bit so far and only verified that everything works. But I'd need
+to understand all that if I want to optimize the backend later on and add new partner sites.
+
+The process for adding new sites is fully manual right now, after adding the site on some DB the crawler
+should pick it up and starting indexing right away. However further down the line there'll be some sort of
+GUI for this most likely. I'm thinking maybe something a bit more automates, checks a bunch of requirements
+itself and then generates a report for human to do final validation.
+
+The cluster isn't reachable from this machine right now (your kubeconfig points at a local API port-forward │
+│ that's down), so I can't run it for you — here are the commands, in the order I'd use them.                             │
+│                                                                                                                         │
+│             **Option 1 — inside the cluster (best: sees everything, no passwords needed).** CNPG's instances have a     │
+│ built-in `postgres` superuser you can reach directly via exec:                                                          │
+│                                                                                                                         │
+│             ```bash                                                                                                     │
+│             # find the instance pod (single-instance cluster -> localmind-pg-0)                                         │
+│             kubectl -n localmind get pods -l cnpg.io/cluster=localmind-pg                                               │
+│                                                                                                                         │
+│             # every database (+ which role owns it)                                                                     │
+│             kubectl exec -n localmind -c postgres localmind-pg-0 -- \                                                   │
+│               psql -U postgres -Atc "SELECT datname, pg_get_userbyid(datdba)                                            │
+│               FROM pg_database WHERE datistemplate = false ORDER BY datname;"                                           │
+│                                                                                                                         │
+│             # every table in every database, in one shot (\gexec fans out per database)                                 │
+│             kubectl exec -n localmind -c postgres localmind-pg-0 -- \                                                   │
+│               psql -U postgres -c "SELECT 'psql -d ' || quote_literal(datname) ||                                       │
+│                 ' -Atc \"SELECT schemaname || chr(46) || tablename FROM pg_tables                                       │
+│                 WHERE schemaname NOT IN                                                                                 │
+│ (chr(112)||chr(103)||chr(95)||chr(99)||chr(97)||chr(116)||chr(97)||chr(108)||chr(111)||chr(103), information_schema)    │
+│ ORDER BY 1;\"' AS cmd                                                                                                   │
+│               FROM pg_database WHERE datistemplate = false ORDER BY datname \gexec"                                     │
+│             ```                                                                                                         │
+│                                                                                                                         │
+│             (That second one is quote-hell through kubectl — if it fights you, the equivalent is: exec a shell into the │
+│ pod once, then run the plain psql loop below.)                                                                          │
+│                                                                                                                         │
+│             ```bash                                                                                                     │
+│             kubectl exec -n localmind -c postgres localmind-pg-0 -- sh                                                  │
+│             # then, inside the pod:                                                                                     │
+│             psql -U postgres                                                                                            │
+│             ```                                                                                                         │
+│             ```sql                                                                                                      │
+│             -- inside psql:                                                                                             │
+│             SELECT datname, pg_get_userbyid(datdba) FROM pg_database WHERE datistemplate = false ORDER BY datname;      │
+│             \l                                          -- same thing, pretty-printed                                   │
+│             \c localmind_crawler                        -- connect to one database, then:                               │
+│             \dt                                         -- its tables                                                   │
+│             SELECT schemaname || '.' || tablename FROM pg_tables                                                        │
+│             WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY 1;                                     │
+│             ```                                                                                                         │
+│                                                                                                                         │
+│             **Option 2 — port-forward + your app role** (what the smoke runbook uses). You see all database *names*     │
+│ (`pg_database` is world-readable), but can only list tables in databases your role has CONNECT on:                      │
+│                                                                                                                         │
+│             ```bash                                                                                                     │
+│             kubectl port-forward -n localmind svc/localmind-pg 5432:5432 &                                              │
+│             PGPASS=$(kubectl -n localmind get secret localmind-crawler-pg -o jsonpath='{.data.PASSWORD}' | base64 -d)   │
+│             PGPASSWORD="***" psql -h localhost -U localmind_crawler -d localmind_crawler -c \                           │
+│               "SELECT datname, pg_get_userbyid(datdba) FROM pg_database WHERE datistemplate = false ORDER BY datname;"  │
+│             ```                                                                                                         │
+│                                                                                                                         │
+│             **Bonus — what's actually holding data** (run per database you care about):                                 │
+│                                                                                                                         │
+│             ```sql                                                                                                      │
+│             SELECT relname, n_live_tup AS rows,                                                                         │
+│                    pg_size_pretty(pg_total_relation_size(relid)) AS total_size                                          │
+│             FROM pg_stat_user_tables ORDER BY n_live_tup DESC;                                                          │
+│             ```                                                                                                         │
+│                                                                                                                         │
+│             Given your setup, I'd expect to see `localmind` (the search app's DB, created by the ai-web-search repo)    │
+│ and `localmind_crawler` (role + db created by the `pg-crawler-db-init` job) — the crawler's only footprint is that one  │
+│ database. If the kubectl port-forward is back up, say the word and I'll run the inventory myself and show you the       │
+│ result. 
