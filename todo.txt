@@ -1,3 +1,8 @@
 the tiering.md has a formula for heat(page), basically a way to calculate how popular any webpage is
     to decide the storage tier for it. But the description below the formula only shows what some of
     it means.
+
+Some sort of off site backup strategy for postgresql and qdrantDB? I suppose the qdrant one isn't
+quite as important, but the whole of postgresql definitely needs a backup since it stores user and 
+partner info. So far everything is designed to be in k8s, so it can't be just another namespace or
+whatever, well it can, but ideally it should live out of the k8s cluster.
