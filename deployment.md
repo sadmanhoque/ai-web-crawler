@@ -23,10 +23,16 @@ Everything else is owned by THIS repo: Redis (the message bus), the crawler,
 indexer and search Deployments, the crawler's ConfigMap + token Secret, and
 the crawler's images.
 
-> **Order of operations:** the shared cluster must exist first. Follow
-> `ai-web-search/dev-env/ai-gen-deployment-steps` (its sections 1–4) through
-> the `pg-crawler-db-init` Job, then come back here. Section 3 below is a
-> read-only health check that proves the shared side is ready.
+> **Assumption:** the ai-web-search/dev-env deployment (the "server") is
+> **already deployed and healthy** — that is the deployment order by design:
+> the server goes first, the crawler comes after. Everything the crawler
+> shares (the Postgres cluster, the crawler's database + role, Qdrant, the
+> two shared Secrets) is created by that deployment. If any part of it is
+> missing, stop and finish that deployment first
+> (`ai-web-search/dev-env/ai-gen-deployment-steps`) — this doc only *uses*
+> the shared resources, it does not create them.
+>
+> Section 3 is a quick read-only pre-check that confirms the assumption.
 
 ---
 
@@ -89,20 +95,22 @@ owns, and vice versa.
 ## 2. Prerequisites
 
 * minikube running, ≥ 4 CPU / ≥ 11 GiB RAM recommended (the indexer image
-  pulls torch; the indexer requests 3 GiB). The ai-web-search doc's
-  prerequisites apply verbatim (kubectl, helm, docker for host-side builds).
-* The **ai-web-search repo checkout** on this machine (its `k8s-manifests/`).
+  pulls torch; the indexer requests 3 GiB). kubectl available for everything
+  in this doc; helm only for the optional KEDA step (section 11).
+* The ai-web-search/dev-env deployment is complete and healthy (the
+  assumption above — section 3 verifies it in one block).
 * This repo (`ai-web-crawler`) at or after the tiering build (steps 1–8):
   `crawler/`, `indexer/`, `search/`, `shared/`, `config/`, `k8s/`.
 * Outbound internet from the cluster (the first crawl downloads the
   sentence-transformers embedding models from Hugging Face — see gotcha #5).
 
-## 3. Step 1 — verify the shared cluster (from the ai-web-search repo)
+## 3. Step 1 — pre-check: the shared resources exist (assumed — verify)
 
-If you have not already deployed ai-web-search, do that first
-(`ai-web-search/dev-env/ai-gen-deployment-steps`, sections 1–4). Then prove
-the shared side is ready — all of these must hold before applying anything
-from this repo:
+Everything checked below is owned by the ai-web-search deployment and is
+**assumed to already exist** — this is a fast read-only pass. Every line
+must hold before you apply anything from this repo; if one is red, the
+server deployment is incomplete — fix it over there
+(`ai-web-search/dev-env/ai-gen-deployment-steps`), not in this doc:
 
 ```bash
 # 1. Postgres cluster is up (CNPG generates the app secret when ready)
@@ -110,14 +118,15 @@ kubectl -n localmind get cluster localmind-pg
 kubectl -n localmind get secret localmind-pg-app
 
 # 2. The crawler's database + role exist in that cluster — the Job that
-#    creates them must be COMPLETE (this is the most common "missing secret"
-#    failure: the Job never ran, or ran before the cluster was ready)
+#    creates them (part of the server deployment) must be COMPLETE.
+#    If this line is red, the server deployment is incomplete:
 kubectl -n localmind get job pg-crawler-db-init
 #   NAME                COMPLETIONS   DURATION
 #   pg-crawler-db-init  1/1           8s
-#   (if it's missing:  kubectl apply -f <ai-web-search>/k8s-manifests/pg-crawler.yaml
-#    then  kubectl -n localmind wait --for=condition=complete job/pg-crawler-db-init --timeout=120s
-#    if it FAILED:      kubectl -n localmind logs job/pg-crawler-db-init)
+#   (missing/failed -> apply from the search repo:
+#    kubectl apply -f <ai-web-search>/k8s-manifests/pg-crawler.yaml
+#    kubectl -n localmind wait --for=condition=complete job/pg-crawler-db-init --timeout=120s
+#    if FAILED: kubectl -n localmind logs job/pg-crawler-db-init)
 
 # 3. The two secrets the crawler stack consumes
 kubectl -n localmind get secret localmind-crawler-pg
