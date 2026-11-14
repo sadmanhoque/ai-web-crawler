@@ -1,7 +1,15 @@
-# Indexer: CPU/GPU-bound embedding workers. Scales independently, driven by stream backlog.
+# Indexer: CPU/GPU-bound embedding workers. Scales independently, driven by
+# stream backlog. Consumes the Redis stream `index:events` (consumer group
+# `indexers`) and upserts chunks into per-profile Qdrant collections in the
+# SHARED qdrant release owned by the ai-web-search repo (svc `qdrant` in this
+# namespace).
+#
+# KEDA auto-scaling is OPTIONAL: see indexer-keda.yaml. Without KEDA this
+# Deployment simply runs at replicas: 1 (a consumer-group consumer, so it
+# works correctly at any replica count).
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: localmind-indexer}
+metadata: {name: localmind-indexer, namespace: localmind}
 spec:
   replicas: 1
   selector: {matchLabels: {app: localmind-indexer}}
@@ -11,30 +19,18 @@ spec:
       containers:
         - name: indexer
           image: registry.example.com/localmind-indexer:latest
+          imagePullPolicy: IfNotPresent
           env:
             - {name: PROFILES_FILE, value: /config/profiles.yaml}
             - {name: REDIS_URL, value: "redis://redis:6379/0"}
             - {name: QDRANT_URL, value: "http://qdrant:6333"}
+            # Qdrant API key of the SHARED release — a key of the
+            # ai-web-search repo's localmind-secrets Secret (same namespace).
+            - name: QDRANT_API_KEY
+              valueFrom: {secretKeyRef: {name: localmind-secrets, key: qdrant-api-key}}
           livenessProbe: {httpGet: {path: /, port: 8080}, initialDelaySeconds: 120}
           resources:
             requests: {cpu: "2", memory: 3Gi}
             limits: {memory: 6Gi}
           volumeMounts: [{name: config, mountPath: /config}]
-      volumes: [{name: config, configMap: {name: localmind-config}}]
----
-# Requires KEDA. Scales on undelivered events in the consumer group (check lagCount support
-# in your KEDA version; pendingEntriesCount is the older alternative).
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata: {name: localmind-indexer}
-spec:
-  scaleTargetRef: {name: localmind-indexer}
-  minReplicaCount: 1
-  maxReplicaCount: 10
-  triggers:
-    - type: redis-streams
-      metadata:
-        address: redis:6379
-        stream: index:events
-        consumerGroup: indexers
-        lagCount: "200"
+      volumes: [{name: config, configMap: {name: localmind-crawler-config}}]

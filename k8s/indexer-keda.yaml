@@ -1,0 +1,27 @@
+# OPTIONAL: KEDA auto-scaling for the indexer. Only apply this AFTER
+# installing the KEDA operator (and the cluster has room — the indexer is the
+# memory-hungry component). Without KEDA, skip this file: localmind-indexer
+# runs at its Deployment replica count and the Redis consumer group makes any
+# replica count correct.
+#
+# Install (single-node minikube):
+#   helm repo add keda https://kedacore.github.io/charts
+#   helm repo update
+#   helm install keda keda/keda --namespace keda --create-namespace
+#
+# Requires KEDA with the redis-streams trigger's lagCount support
+# (pendingEntriesCount is the older alternative — check your KEDA version).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: localmind-indexer, namespace: localmind}
+spec:
+  scaleTargetRef: {name: localmind-indexer}
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  triggers:
+    - type: redis-streams
+      metadata:
+        address: redis:6379
+        stream: index:events
+        consumerGroup: indexers
+        lagCount: "200"

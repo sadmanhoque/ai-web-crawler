@@ -14,10 +14,12 @@ spec:
       containers:
         - name: crawler
           image: registry.example.com/localmind-crawler:latest
+          imagePullPolicy: IfNotPresent
           ports: [{containerPort: 8000}]
           env:
             - {name: PROFILES_FILE, value: /config/profiles.yaml}
             - {name: SITES_FILE, value: /config/sites.yaml}
+            - {name: TIERS_FILE, value: /config/tiers.yaml}
             - {name: CRAWL_WORKERS, value: "2"}
             - {name: REDIS_URL, value: "redis://redis:6379/0"}
             # Own database in the shared localmind-pg cluster. The Secret is
@@ -25,17 +27,20 @@ spec:
             # its pg-crawler.yaml Job creates the role + database it points at.
             - name: DATABASE_URL        # postgresql+psycopg://localmind_crawler:***@localmind-pg-rw.../localmind_crawler
               valueFrom: {secretKeyRef: {name: localmind-crawler-pg, key: database-url}}
+            # Crawler-repo-only tokens. localmind-crawler-secret is created per
+            # k8s/configmap.md — NOT the ai-web-search repo's localmind-secrets,
+            # which owns a different key set in this same namespace.
             - name: ADMIN_TOKEN
-              valueFrom: {secretKeyRef: {name: localmind-secrets, key: admin-token}}
+              valueFrom: {secretKeyRef: {name: localmind-crawler-secret, key: admin-token}}
             - name: ANTHROPIC_API_KEY
-              valueFrom: {secretKeyRef: {name: localmind-secrets, key: anthropic-key}}
+              valueFrom: {secretKeyRef: {name: localmind-crawler-secret, key: anthropic-key}}
           readinessProbe: {httpGet: {path: /healthz, port: 8000}}
           livenessProbe: {httpGet: {path: /healthz, port: 8000}, initialDelaySeconds: 20}
           resources:
             requests: {cpu: 500m, memory: 1Gi}
             limits: {memory: 2Gi}
           volumeMounts: [{name: config, mountPath: /config}]
-      volumes: [{name: config, configMap: {name: localmind-config}}]
+      volumes: [{name: config, configMap: {name: localmind-crawler-config}}]
 ---
 apiVersion: v1
 kind: Service

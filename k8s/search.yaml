@@ -1,0 +1,44 @@
+# Search (tiering slice): keyword fallback leg over page_stats/page_archives,
+# /restore (re-embed a vaulted page via the indexer stream), and /web (CSE/Bing
+# union source). Reads the SAME localmind_crawler database and Redis as the
+# crawler — it serves the crawler's tables and publishes PromoteMsg on the
+# indexer stream for restores.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: localmind-search, namespace: localmind}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: localmind-search}}
+  template:
+    metadata: {labels: {app: localmind-search}}
+    spec:
+      containers:
+        - name: search
+          image: registry.example.com/localmind-search:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8000}]
+          env:
+            - {name: REDIS_URL, value: "redis://redis:6379/0"}
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: localmind-crawler-pg, key: database-url}}
+            # Web-search leg. Provider: google (CSE) or bing; missing keys
+            # make /web return 400 by design (misconfiguration, not 500).
+            - {name: WEB_SEARCH_PROVIDER, value: "google"}
+            - name: CSE_API_KEY
+              valueFrom: {secretKeyRef: {name: localmind-crawler-secret, key: cse-api-key}}
+            - name: CSE_CX
+              valueFrom: {secretKeyRef: {name: localmind-crawler-secret, key: cse-cx}}
+            - name: BING_API_KEY
+              valueFrom: {secretKeyRef: {name: localmind-crawler-secret, key: bing-api-key}}
+          readinessProbe: {httpGet: {path: /health, port: 8000}}
+          livenessProbe: {httpGet: {path: /health, port: 8000}, initialDelaySeconds: 15}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: localmind-search, namespace: localmind}
+spec:
+  selector: {app: localmind-search}
+  ports: [{port: 80, targetPort: 8000}]

@@ -1,0 +1,36 @@
+# Redis — the message bus between crawler and indexer.
+# Streams: index:events (work items, XADD maxlen ~1M), index:dead (DLQ),
+# consumer group: indexers.
+#
+# Dev-grade on purpose: no persistence. Losing the streams on a restart costs
+# at most one missed (re-)embed cycle — page truth lives in Postgres
+# (page_archives) and Qdrant (vectors), and the next crawl pass re-publishes
+# what the stream held. If you outgrow this, swap in a persistent Redis (or
+# Bitnami/Valkey chart) keeping service name `redis` and port 6379.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: redis, namespace: localmind}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: redis}}
+  template:
+    metadata: {labels: {app: redis}}
+    spec:
+      containers:
+        - name: redis
+          image: redis:7
+          # noeviction: streams are bounded by XADD maxlen; we would rather
+          # fail a publish loudly than silently lose events to LRU eviction.
+          args: ["redis-server", "--maxmemory", "1gb", "--maxmemory-policy", "noeviction"]
+          ports: [{containerPort: 6379}]
+          livenessProbe: {tcpSocket: {port: 6379}, initialDelaySeconds: 10}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: redis, namespace: localmind}
+spec:
+  selector: {app: redis}
+  ports: [{port: 6379, targetPort: 6379}]
