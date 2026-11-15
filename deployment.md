@@ -392,6 +392,19 @@ database behind it does not.
 → the section-4 secret was never created, or under the wrong name. The crawler
 and search reference `localmind-crawler-secret` — NOT the search repo's
 `localmind-secrets`, which has a different key set.
+Same symptom with a different name — `secret "localmind-crawler-pg" not found`
+on a `pg-crawler-db-init` pod → the server deployment's `secrets.dev.yaml`
+predates that Secret, or only its first document was applied. It is the
+SECOND Secret in that file. Create it:
+    kubectl create secret generic localmind-crawler-pg -n localmind \
+      --from-literal=user=localmind_crawler \
+      --from-literal=password=dev-cra...c1e7 \
+      --from-literal=dbname=localmind_crawler \
+      --from-literal=host=localmind-pg-rw.localmind.svc.cluster.local \
+      --from-literal=port=5432 \
+      --from-literal=database-url="postgresql+psycopg://localmind_crawler:***@localmind-pg-rw.localmind.svc.cluster.local:5432/localmind_crawler"
+  No Job re-apply needed: kubelet retries container creation while the pod
+  sits in Pending, so it starts on its own the moment the Secret exists.
 
 #3 `CreateContainerConfigError: configmap "localmind-crawler-config" not found`
 → section 4 not run. Note the search repo also creates a ConfigMap named
@@ -437,6 +450,23 @@ only the port-forward (8.3) + the pg-crawler Job matter. Its Redis is a local
 shows a pending count
 → the consumer group is shared by design across replicas. Pending only drains
 as consumers ACK (the indexer ACKs after upserting).
+
+#13 `wait --for=condition=complete` hangs; the Job stays 0/1 with only a
+`SuccessfulCreate` event
+→ Job objects only ever carry `SuccessfulCreate` (job-controller: "I created
+the pod") — the pod's story lives on the pod, not the Job:
+    kubectl -n localmind get pods -l job-name=pg-crawler-db-init
+    kubectl -n localmind describe pod <pod>     # Events: pull? schedule? restarts?
+    kubectl -n localmind logs <pod>
+Usual suspects: (a) the pod is stuck ContainerCreating / ImagePullBackOff —
+the ghcr.io/cloudnative-pg image won't pull inside minikube; pre-pull with
+`minikube image pull ghcr.io/cloudnative-pg/postgresql:16.4`, then delete the
+pod so the Job recreates it; (b) the pod is Running and psql is silently
+hanging on the TCP connect because Postgres isn't actually ready (check
+`get cluster localmind-pg`, the instance pods, `get svc localmind-pg-rw`);
+(c) the Job already exhausted backoffLimit (6) and is terminal Failed —
+nothing revives it: fix the cause, then `kubectl delete job pg-crawler-db-init
+-n localmind` and re-apply the manifest.
 
 ## 13. Glossary
 
