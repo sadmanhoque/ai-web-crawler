@@ -99,6 +99,13 @@ owns, and vice versa.
   in this doc; helm only for the optional KEDA step (section 11).
 * The ai-web-search/dev-env deployment is complete and healthy (the
   assumption above — section 3 verifies it in one block).
+* The machine you deploy from must have **current checkouts of BOTH repos**.
+  This failure mode is real: a stale ai-web-search checkout ships
+  (a) a `secrets.dev.yaml` without the `localmind-crawler-pg` Secret, and
+  (b) an old `pg-crawler.yaml` whose heredoc gets mangled by shell expansion,
+  so the Job's pod dies with `ERROR: syntax error at or near "$"` /
+  `LINE 1: DO $`. Verify freshness before applying anything (section 3,
+  item 0); if a grep is wrong, sync the checkout (git pull) and re-verify.
 * This repo (`ai-web-crawler`) at or after the tiering build (steps 1–8):
   `crawler/`, `indexer/`, `search/`, `shared/`, `config/`, `k8s/`.
 * Outbound internet from the cluster (the first crawl downloads the
@@ -113,6 +120,13 @@ server deployment is incomplete — fix it over there
 (`ai-web-search/dev-env/ai-gen-deployment-steps`), not in this doc:
 
 ```bash
+# 0. The ai-web-search checkout on this machine is CURRENT (a stale one
+#    ships a secrets.dev.yaml without localmind-crawler-pg and an old
+#    pg-crawler.yaml whose heredoc mangles DO $$ — see gotcha #14):
+grep -c 'kind: Secret' <ai-web-search>/k8s-manifests/secrets.dev.yaml   # want: 2
+grep -n "<<'EOSQL'"    <ai-web-search>/k8s-manifests/pg-crawler.yaml    # want: 1
+grep -n 'DO \$\$'      <ai-web-search>/k8s-manifests/pg-crawler.yaml    # want: 1
+
 # 1. Postgres cluster is up (CNPG generates the app secret when ready)
 kubectl -n localmind get cluster localmind-pg
 kubectl -n localmind get secret localmind-pg-app
@@ -467,6 +481,20 @@ hanging on the TCP connect because Postgres isn't actually ready (check
 (c) the Job already exhausted backoffLimit (6) and is terminal Failed —
 nothing revives it: fix the cause, then `kubectl delete job pg-crawler-db-init
 -n localmind` and re-apply the manifest.
+
+#14 `pg-crawler-db-init` fails with `ERROR: syntax error at or near "$"` /
+`LINE 1: DO $`
+→ the ai-web-search checkout on the deployment machine is STALE: the old
+pg-crawler.yaml's heredoc does not survive shell expansion, so the
+dollar-quoted `DO $$ ... $$;` block reaches psql as `DO $`. Its sibling
+symptom is the missing `localmind-crawler-pg` Secret (gotcha #2) — the same
+stale `secrets.dev.yaml`. Fix: sync the checkout (git pull), verify with the
+greps in section 3 item 0, then re-run the terminal Job:
+    kubectl -n localmind delete job pg-crawler-db-init
+    kubectl apply -f <ai-web-search>/k8s-manifests/pg-crawler.yaml
+    kubectl -n localmind wait --for=condition=complete job/pg-crawler-db-init --timeout=120s
+(The current file in the repo is verified: the full script, run with a
+stubbed psql, passes `DO $$ ... $$;` to psql byte-for-byte intact.)
 
 ## 13. Glossary
 
