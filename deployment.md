@@ -9,8 +9,9 @@ ai-web-search deployment, and only because it deliberately does:
 
 * the **Postgres cluster** — the CNPG cluster `localmind-pg` deployed by the
   ai-web-search repo. The crawler gets its **own database** (`localmind_crawler`)
-  and **own login role** inside that cluster, created by the ai-web-search
-  repo's one-shot Job `pg-crawler.yaml`. Same cluster = one HA setup, one
+  and **own login role** inside that cluster, created by the CNPG operator
+  from the ai-web-search repo's `crawler-db.yaml` (`DatabaseRole` + `Database`).
+  Same cluster = one HA setup, one
   backup, one monitoring surface; separate database = clean ownership and
   least privilege (the crawler can never touch the app's `localmind` DB with
   users/subscriptions, and vice versa).
@@ -43,10 +44,10 @@ the crawler's images.
  ┌──────────────────────────────────────────────────────────────────────┐
  │ localmind-pg  (CNPG cluster, namespace localmind)                    │
  │   ├─ db localmind          (search app: users, subscriptions, ...)   │
- │   └─ db localmind_crawler  (role+db created by pg-crawler.yaml Job)  │
+ │   └─ db localmind_crawler  (role+db: crawler-db.yaml)                │
  │ qdrant        (Helm release, svc qdrant:6333,                       │
  │                API key = localmind-secrets/qdrant-api-key)           │
- │ secrets: localmind-secrets, localmind-crawler-pg                     │
+ │ secrets: localmind-secrets, localmind-crawler-pg, -cred              │
  └──────────────────────────────────────────────────────────────────────┘
       ▲  upserts vectors per collection      ▲ connects
       │                                      │
@@ -75,8 +76,9 @@ vectors; `/restore` re-embeds from the archive on demand).
 | Object | Namespace | Owner | Notes |
 |---|---|---|---|
 | CNPG operator + `localmind-pg` cluster | localmind | **ai-web-search** (`cngp.local.yaml` for minikube) | shared Postgres |
-| Job `pg-crawler-db-init` | localmind | **ai-web-search** (`pg-crawler.yaml`) | creates role+db `localmind_crawler`; **must be Complete before the crawler pod starts** |
+| `DatabaseRole` + `Database` (role+db `localmind_crawler`) | localmind | **ai-web-search** (`crawler-db.yaml`) | **operator-managed** — the CNPG operator creates/syncs them; apply before the crawler pod starts |
 | Secret `localmind-crawler-pg` | localmind | **ai-web-search** (`secrets.dev.yaml`) | `user`, `password`, `dbname`, `host`, `port`, `database-url` |
+| Secret `localmind-crawler-cred` | localmind | **ai-web-search** (`secrets.dev.yaml`) | basic-auth creds for the operator-managed role; the operator syncs the PG role's password to it (`cnpg.io/reload` label) |
 | Helm release `qdrant` (+ svc `qdrant`) | localmind | **ai-web-search** | shared vector DB |
 | Secret `localmind-secrets` | localmind | **ai-web-search** | `qdrant-api-key`, Stripe, JWT, … — the crawler only reads `qdrant-api-key` from it |
 | ConfigMap `localmind-config` | localmind | **ai-web-search** | the search app's env — **do not reuse the name** |
@@ -100,12 +102,13 @@ owns, and vice versa.
 * The ai-web-search/dev-env deployment is complete and healthy (the
   assumption above — section 3 verifies it in one block).
 * The machine you deploy from must have **current checkouts of BOTH repos**.
-  This failure mode is real: a stale ai-web-search checkout ships
-  (a) a `secrets.dev.yaml` without the `localmind-crawler-pg` Secret, and
-  (b) an old `pg-crawler.yaml` whose heredoc gets mangled by shell expansion,
-  so the Job's pod dies with `ERROR: syntax error at or near "$"` /
-  `LINE 1: DO $`. Verify freshness before applying anything (section 3,
-  item 0); if a grep is wrong, sync the checkout (git pull) and re-verify.
+  This failure mode is real: a stale ai-web-search checkout predates
+  `crawler-db.yaml` and the `localmind-crawler-cred` Secret (it shipped the
+  `pg-crawler.yaml` Job instead, which dies with "permission denied to
+  create role" on clusters where the app user is not a superuser — the
+  reason it was replaced). Verify freshness before applying anything
+  (section 3, item 0); if a grep is wrong, sync the checkout (git pull)
+  and re-verify.
 * This repo (`ai-web-crawler`) at or after the tiering build (steps 1–8):
   `crawler/`, `indexer/`, `search/`, `shared/`, `config/`, `k8s/`.
 * Outbound internet from the cluster (the first crawl downloads the
@@ -121,30 +124,40 @@ server deployment is incomplete — fix it over there
 
 ```bash
 # 0. The ai-web-search checkout on this machine is CURRENT (a stale one
-#    ships a secrets.dev.yaml without localmind-crawler-pg and an old
-#    pg-crawler.yaml whose heredoc mangles DO $$ — see gotcha #14):
-grep -c 'kind: Secret' <ai-web-search>/k8s-manifests/secrets.dev.yaml   # want: 2
-grep -n "<<'EOSQL'"    <ai-web-search>/k8s-manifests/pg-crawler.yaml    # want: 1
-grep -n 'DO \$\$'      <ai-web-search>/k8s-manifests/pg-crawler.yaml    # want: 1
+#    predates crawler-db.yaml + the localmind-crawler-cred Secret —
+#    see gotcha #14):
+grep -c 'kind: Secret' <ai-web-search>/k8s-manifests/secrets.dev.yaml   # want: 3
+grep -n '^kind: DatabaseRole$' <ai-web-search>/k8s-manifests/crawler-db.yaml   # want: 1
+grep -n '^kind: Database$'     <ai-web-search>/k8s-manifests/crawler-db.yaml   # want: 1
 
 # 1. Postgres cluster is up (CNPG generates the app secret when ready)
 kubectl -n localmind get cluster localmind-pg
 kubectl -n localmind get secret localmind-pg-app
 
-# 2. The crawler's database + role exist in that cluster — the Job that
-#    creates them (part of the server deployment) must be COMPLETE.
-#    If this line is red, the server deployment is incomplete:
-kubectl -n localmind get job pg-crawler-db-init
-#   NAME                COMPLETIONS   DURATION
-#   pg-crawler-db-init  1/1           8s
-#   (missing/failed -> apply from the search repo:
-#    kubectl apply -f <ai-web-search>/k8s-manifests/pg-crawler.yaml
-#    kubectl -n localmind wait --for=condition=complete job/pg-crawler-db-init --timeout=120s
-#    if FAILED: kubectl -n localmind logs job/pg-crawler-db-init)
+# 2. The crawler's database + role exist in that cluster — OPERATOR-managed
+#    (part of the server deployment: crawler-db.yaml declares a DatabaseRole
+#    + a Database; the CNPG operator performs the DDL as the true superuser,
+#    so no Job, no psql, no privileged credentials). If either is red, the
+#    server deployment is incomplete:
+kubectl -n localmind get databaseroles
+#   NAME                     ROLENAME             STATUS
+#   localmind-crawler-role   localmind_crawler    Reconciled
+kubectl -n localmind get databases
+#   NAME                    DATABASE         OWNER               STATUS
+#   localmind-crawler-db    localmind_crawler localmind_crawler  Reconciled
+#   (missing / not Reconciled -> apply from the search repo:
+#    kubectl apply -f <ai-web-search>/k8s-manifests/crawler-db.yaml
+#    and re-check in ~15s — the operator reconciles; on an existing cluster
+#    where the role/db were created manually, applying adopts them)
 
-# 3. The two secrets the crawler stack consumes
+# 3. The secrets the crawler stack consumes
 kubectl -n localmind get secret localmind-crawler-pg
+kubectl -n localmind get secret localmind-crawler-cred
 kubectl -n localmind get secret localmind-secrets
+#   localmind-crawler-cred must carry the SAME password as
+#   localmind-crawler-pg (operator-managed role sync — gotcha #13):
+kubectl -n localmind get secret localmind-crawler-pg -o jsonpath='{.data.password}' | base64 -d; echo
+kubectl -n localmind get secret localmind-crawler-cred -o jsonpath='{.data.password}' | base64 -d; echo
 #   localmind-secrets must contain the key qdrant-api-key:
 kubectl -n localmind get secret localmind-secrets -o jsonpath='{.data.qdrant-api-key}' | base64 -d; echo
 
@@ -397,9 +410,13 @@ any fixed replica count.
 
 #1 Crawler pod CrashLoopBackOff; log shows
 `sqlalchemy.exc.OperationalError: ... localmind-pg-rw...:5432`
-→ the `pg-crawler-db-init` Job never ran (or the cluster was destroyed and
-recreated). Run/wait it (section 3, item 2). The secret can exist while the
-database behind it does not.
+(password authentication failed for user "localmind_crawler")
+→ the crawler role/database are missing from the cluster (fresh cluster where
+crawler-db.yaml was never applied, or the cluster was destroyed and recreated),
+or the two credential secrets disagree (gotcha #13).
+Check `kubectl -n localmind get databaseroles databases`; apply
+<ai-web-search>/k8s-manifests/crawler-db.yaml if needed. The secrets can exist
+while the role+database behind them do not.
 
 #2 `CreateContainerConfigError: secret "localmind-crawler-secret" not found`
 (or `key "admin-token" not found`)
@@ -412,11 +429,11 @@ predates that Secret, or only its first document was applied. It is the
 SECOND Secret in that file. Create it:
     kubectl create secret generic localmind-crawler-pg -n localmind \
       --from-literal=user=localmind_crawler \
-      --from-literal=password=dev-cra...c1e7 \
+      --from-literal=password=dev-crawler-pg-pass-1258fdefaf7a476bb72123cdf0812d28 \
       --from-literal=dbname=localmind_crawler \
       --from-literal=host=localmind-pg-rw.localmind.svc.cluster.local \
       --from-literal=port=5432 \
-      --from-literal=database-url="postgresql+psycopg://localmind_crawler:***@localmind-pg-rw.localmind.svc.cluster.local:5432/localmind_crawler"
+      --from-literal=database-url="postgresql+psycopg://localmind_crawler:dev-crawler-pg-pass-1258fdefaf7a476bb72123cdf0812d28@localmind-pg-rw.localmind.svc.cluster.local:5432/localmind_crawler"
   No Job re-apply needed: kubelet retries container creation while the pod
   sits in Pending, so it starts on its own the moment the Secret exists.
 
@@ -465,36 +482,31 @@ shows a pending count
 → the consumer group is shared by design across replicas. Pending only drains
 as consumers ACK (the indexer ACKs after upserting).
 
-#13 `wait --for=condition=complete` hangs; the Job stays 0/1 with only a
-`SuccessfulCreate` event
-→ Job objects only ever carry `SuccessfulCreate` (job-controller: "I created
-the pod") — the pod's story lives on the pod, not the Job:
-    kubectl -n localmind get pods -l job-name=pg-crawler-db-init
-    kubectl -n localmind describe pod <pod>     # Events: pull? schedule? restarts?
-    kubectl -n localmind logs <pod>
-Usual suspects: (a) the pod is stuck ContainerCreating / ImagePullBackOff —
-the ghcr.io/cloudnative-pg image won't pull inside minikube; pre-pull with
-`minikube image pull ghcr.io/cloudnative-pg/postgresql:16.4`, then delete the
-pod so the Job recreates it; (b) the pod is Running and psql is silently
-hanging on the TCP connect because Postgres isn't actually ready (check
-`get cluster localmind-pg`, the instance pods, `get svc localmind-pg-rw`);
-(c) the Job already exhausted backoffLimit (6) and is terminal Failed —
-nothing revives it: fix the cause, then `kubectl delete job pg-crawler-db-init
--n localmind` and re-apply the manifest.
+#13 Pod crashloops with `password authentication failed for user "localmind_crawler"`
+even though `get databaseroles` says Reconciled
+→ the operator syncs the PG role's password from `localmind-crawler-cred` on
+every reconciliation, while the pods connect with `localmind-crawler-pg`'s
+database-url. If the two secrets disagree (one re-created with a different
+value), the role ends up with a password the pods don't send. Compare:
+    kubectl -n localmind get secret localmind-crawler-pg -o jsonpath='{.data.password}' | base64 -d; echo
+    kubectl -n localmind get secret localmind-crawler-cred -o jsonpath='{.data.password}' | base64 -d; echo
+Make both carry the same password, then roll the pods:
+    kubectl -n localmind rollout restart deploy/localmind-crawler localmind-search
+Never fix it with a hand ALTER ROLE — the operator flips the password back on
+the next reconciliation.
 
-#14 `pg-crawler-db-init` fails with `ERROR: syntax error at or near "$"` /
-`LINE 1: DO $`
-→ the ai-web-search checkout on the deployment machine is STALE: the old
-pg-crawler.yaml's heredoc does not survive shell expansion, so the
-dollar-quoted `DO $$ ... $$;` block reaches psql as `DO $`. Its sibling
-symptom is the missing `localmind-crawler-pg` Secret (gotcha #2) — the same
-stale `secrets.dev.yaml`. Fix: sync the checkout (git pull), verify with the
-greps in section 3 item 0, then re-run the terminal Job:
-    kubectl -n localmind delete job pg-crawler-db-init
-    kubectl apply -f <ai-web-search>/k8s-manifests/pg-crawler.yaml
-    kubectl -n localmind wait --for=condition=complete job/pg-crawler-db-init --timeout=120s
-(The current file in the repo is verified: the full script, run with a
-stubbed psql, passes `DO $$ ... $$;` to psql byte-for-byte intact.)
+#14 `kubectl get databaseroles` / `get databases` comes back empty (or the
+operator logs show the DatabaseRole reconciliation failing) right after a
+server deploy
+→ the ai-web-search checkout on the deployment machine is STALE: old
+checkouts predate crawler-db.yaml (they shipped the pg-crawler.yaml Job
+instead, which died with "permission denied to create role" on clusters
+where the localmind-pg-app user is not a superuser — the reason it was
+replaced). Its sibling symptom is the missing `localmind-crawler-cred`
+Secret (gotcha #2) — the same stale `secrets.dev.yaml`. Fix: sync the
+checkout (git pull), verify with the greps in section 3 item 0, then:
+    kubectl apply -f <ai-web-search>/k8s-manifests/crawler-db.yaml
+    kubectl -n localmind get databaseroles databases   # both Reconciled
 
 ## 13. Glossary
 
@@ -517,6 +529,12 @@ stubbed psql, passes `DO $$ ... $$;` to psql byte-for-byte intact.)
 
 * Replace the `registry.example.com/...:latest` placeholders with a real
   registry and immutable tags (`IfNotPresent` stays harmless).
+* Crawler role + database are operator-managed (`crawler-db.yaml` in the
+  ai-web-search repo): fresh cluster = apply secrets → cngp → crawler-db.yaml,
+  and no manual DDL, no Job, no superuser credentials ever leave the operator.
+  Rotating the crawler password = update `localmind-crawler-cred` (the
+  `cnpg.io/reload` label applies it immediately) plus `localmind-crawler-pg`
+  — no psql, no ALTER.
 * Prod Postgres secret template lives in the ai-web-search repo
   (`secrets.prod.template.yaml`); the Barman block in its `cngp.yaml` backs
   up the whole cluster — `localmind_crawler` included — with one setup.
