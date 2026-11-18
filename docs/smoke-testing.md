@@ -19,8 +19,8 @@ port-forward. This keeps `127.0.0.1:8801` valid from every process.
 ```bash
 # Terminal 0 — shared Postgres (the pg-crawler-db-init job created role + db
 # localmind_crawler in the cluster; credentials from localmind-crawler-pg):
-kubectl port-forward -n localmind svc/localmind-pg 5433:5432 &
-PGPASS=$(kubectl -n localmind get secret localmind-crawler-pg -o jsonpath='{.data.PASSWORD}' | base64 -d)
+kubectl port-forward -n localmind svc/localmind-pg-rw 5433:5432 &
+PGPASS=$(kubectl -n localmind get secret localmind-crawler-pg -o jsonpath='{.data.password}' | base64 -d)
 
 # Terminal 1 — Redis (the message bus between crawler and indexer):
 docker run -d --name tiering-smoke-redis -p 6379:6379 redis:7

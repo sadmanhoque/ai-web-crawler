@@ -272,7 +272,7 @@ curl -s "localhost:8001/search?q=test"         # {"query":"test","results":[]} â
 ### 8.3 Postgres (shared cluster, crawler's database)
 
 ```bash
-kubectl port-forward -n localmind svc/localmind-pg 5433:5432 &
+kubectl port-forward -n localmind svc/localmind-pg-rw 5433:5432 &
 PGPASS=$(kubectl -n localmind get secret localmind-crawler-pg -o jsonpath='{.data.password}' | base64 -d)
 PGPASSWORD="***" psql -h localhost -p 5433 -U localmind_crawler -d localmind_crawler -c "\dt"
 #    List of Relations
