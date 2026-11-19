@@ -334,6 +334,7 @@ kubectl -n localmind get secret localmind-crawler-cred -o jsonpath='{.data.passw
 ```
 
 ### 6.2 Crawler config + token secret (idempotent apply)
+Move over to ai-web-crawler repo to run these commands.
 
 Use `--dry-run=client | apply` so re-runs don't fail with `AlreadyExists`
 (a plain `kubectl create` does — this is what makes the deploy repeatable /
