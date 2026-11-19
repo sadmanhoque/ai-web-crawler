@@ -17,7 +17,7 @@ in the shared `localmind` k8s cluster and is reached with a
 port-forward. This keeps `127.0.0.1:8801` valid from every process.
 
 ```bash
-# Terminal 0 — shared Postgres (the pg-crawler-db-init job created role + db
+# Terminal 0 — shared Postgres (crawler-db.yaml created role + db via the CNPG op
 # localmind_crawler in the cluster; credentials from localmind-crawler-pg):
 kubectl port-forward -n localmind svc/localmind-pg-rw 5433:5432 &
 PGPASS=$(kubectl -n localmind get secret localmind-crawler-pg -o jsonpath='{.data.password}' | base64 -d)

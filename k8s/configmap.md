@@ -31,7 +31,8 @@ kubectl create secret generic localmind-crawler-secret \
 # the `localmind-crawler-pg` Secret (user/password + database-url) is created
 # by the ai-web-search repo — k8s-manifests/secrets.dev.yaml (dev) or
 # k8s-manifests/secrets.prod.template.yaml (prod) — and its
-# k8s-manifests/pg-crawler.yaml Job creates the matching role + database
-# `localmind_crawler` inside the shared localmind-pg CNPG cluster.
-# That Job must have COMPLETED before the crawler Deployment starts:
-#   kubectl -n localmind get job pg-crawler-db-init
+# k8s-manifests/crawler-db.yaml (DatabaseRole + Database) creates the matching
+# role + database `localmind_crawler` inside the shared localmind-pg CNPG
+# cluster, OPERATOR-managed. Both must be Reconciled before the crawler
+# Deployment starts:
+#   kubectl -n localmind get databaseroles databases   # both STATUS: Reconciled

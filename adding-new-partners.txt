@@ -71,6 +71,6 @@ The cluster isn't reachable from this machine right now (your kubeconfig points 
 │             ```                                                                                                         │
 │                                                                                                                         │
 │             Given your setup, I'd expect to see `localmind` (the search app's DB, created by the ai-web-search repo)    │
-│ and `localmind_crawler` (role + db created by the `pg-crawler-db-init` job) — the crawler's only footprint is that one  │
+│ and `localmind_crawler` (role + db, operator-managed via `crawler-db.yaml`) — the crawler's only footprint is that one  │
 │ database. If the kubectl port-forward is back up, say the word and I'll run the inventory myself and show you the       │
 │ result. 

@@ -105,10 +105,13 @@ tierctl config [D]                effective tiering params, per-parameter proven
 ## Run
 Shared-infra prerequisites (all in the `localmind` namespace, deployed by the
 ai-web-search repo): the `localmind-pg` CNPG cluster is Ready, the
-`localmind-crawler-pg` Secret is applied, and the `pg-crawler-db-init` Job has
-completed — that Job creates role + database `localmind_crawler` in the shared
-cluster, which is the crawler's only Postgres footprint:
-    kubectl -n localmind get job pg-crawler-db-init
+`localmind-crawler-pg` Secret is applied, and the crawler's role + database
+`localmind_crawler` exist in the shared cluster — created operator-managed by
+`ai-web-search/k8s-manifests/crawler-db.yaml` (DatabaseRole + Database), the
+crawler's only Postgres footprint:
+    kubectl -n localmind get databaseroles databases   # both STATUS: Reconciled
+
+Full sequenced deploy of both repos, in order: see `deployment.md`.
 
 ```
 docker build -f crawler/Dockerfile -t localmind-crawler .
