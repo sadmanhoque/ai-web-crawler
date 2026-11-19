@@ -5,3 +5,5 @@ psycopg[binary]
 pydantic>=2
 redis
 requests
+beautifulsoup4
+pyyaml
