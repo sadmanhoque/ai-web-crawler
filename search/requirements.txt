@@ -3,7 +3,7 @@ uvicorn[standard]
 sqlalchemy>=2
 psycopg[binary]
 pydantic>=2
-redis
+redis<8
 requests
 beautifulsoup4
 pyyaml

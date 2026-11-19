@@ -1,4 +1,4 @@
-redis
+redis<8
 qdrant-client
 sentence-transformers
 langchain-text-splitters

@@ -643,6 +643,26 @@ needs `-H "api-key: $QKEY"`.
 shows a pending count.** The consumer group is shared by design across
 replicas; pending drains only as consumers ACK (the indexer ACKs after upsert).
 
+**C-15 Crawler pod crashloops: `psycopg.errors.DatatypeMismatch: column
+"enabled" is of type boolean but default expression is of type integer`.**
+`partners.enabled` was declared with `server_default=text("1")`; Postgres
+rejects an integer default on a boolean column, so `init_db()` (`create_all`)
+died at startup in every pod that builds tables. Fixed in `crawler/db.py`
+(`server_default=text("true")`). Rule: boolean server defaults are the text
+`true`/`false` — never `1`/`0`.
+
+**C-16 Indexer crashloops ~5 s after `ready` on an idle stream:
+`redis.exceptions.TimeoutError: Timeout reading from socket`.** redis-py **8.x
+changed the default `socket_timeout` from `None` to 5 s** (`_defaults.py`).
+The indexer's `XREADGROUP ... block=5000` legitimately holds the socket for the
+full 5 s while the stream is empty (always, on a fresh cluster before the first
+crawl), so the read timed out at exactly the block length and the uncaught
+exception killed the process. Only the indexer is affected — it's the sole
+blocking reader. Fixed three ways: `get_redis()` now passes an explicit
+`socket_timeout=30` (must stay **> block=5000**), the consume loop catches
+`TimeoutError`/`ConnectionError` and retries, and `redis<8` is pinned in all
+three requirements files — don't unpin it.
+
 **C-14 `get databaseroles`/`databases` empty right after a server deploy.** The
 ai-web-search checkout on the deploy machine is **stale** — old checkouts
 predated `crawler-db.yaml` and shipped the `pg-crawler.yaml` Job instead, which

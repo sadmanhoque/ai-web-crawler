@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 sqlalchemy>=2
 psycopg[binary]
-redis
+redis<8
 requests
 beautifulsoup4
 pydantic>=2

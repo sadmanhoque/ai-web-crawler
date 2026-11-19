@@ -1,6 +1,7 @@
 """Indexer worker: consumes the Redis stream, chunks + embeds + upserts into Qdrant.
 Scale by adding replicas (consumer group). No crawling happens here."""
 import logging
+import redis
 import threading
 import time
 import uuid
@@ -146,13 +147,20 @@ def main():
         embed(p.embedding_model, ["warmup"])
     log.info("indexer %s ready", CONSUMER)
     while True:
-        claimed = r.xautoclaim(STREAM, GROUP, CONSUMER, min_idle_time=300_000, start_id="0-0", count=10)[1]
-        for mid, fields in claimed:                    # take over work from crashed replicas
-            if fields:
-                process(r, mid, fields)
-        for _, msgs in r.xreadgroup(GROUP, CONSUMER, {STREAM: ">"}, count=16, block=5000) or []:
-            for mid, fields in msgs:
-                process(r, mid, fields)
+        try:
+            claimed = r.xautoclaim(STREAM, GROUP, CONSUMER, min_idle_time=300_000, start_id="0-0", count=10)[1]
+            for mid, fields in claimed:                # take over work from crashed replicas
+                if fields:
+                    process(r, mid, fields)
+            for _, msgs in r.xreadgroup(GROUP, CONSUMER, {STREAM: ">"}, count=16, block=5000) or []:
+                for mid, fields in msgs:
+                    process(r, mid, fields)
+        except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as e:
+            # Stream-read blip (redis restart, hiccup, hung socket): back off and
+            # keep consuming. process() already retries + dead-letters per event;
+            # this guards the read itself. Keep get_redis()' socket_timeout > block.
+            log.warning("redis read error (%s: %s), retrying in 1s", type(e).__name__, e)
+            time.sleep(1)
 
 
 if __name__ == "__main__":

@@ -84,7 +84,11 @@ def parse_event(data: str):
 
 
 def get_redis() -> redis.Redis:
-    return redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    # Explicit socket_timeout: must stay > the indexer's XREADGROUP block=5000
+    # (an idle read holds the socket for the full block). redis-py 8.x changed
+    # the default from None to 5s, which crashed idle consumers; we pin redis<8
+    # in requirements anyway, but the explicit value keeps intent clear.
+    return redis.Redis.from_url(REDIS_URL, decode_responses=True, socket_timeout=30)
 
 
 def publish(r: redis.Redis, msg: BaseModel):
