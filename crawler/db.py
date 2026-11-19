@@ -82,7 +82,7 @@ class Partner(Base):
     backfill_cutoff_days: Mapped[int] = mapped_column(default=365, server_default=text("365"))
     tier_config: Mapped[dict] = mapped_column(JSON, default=dict,
                                               server_default=text("'{}'"))     # TierConfig overrides
-    enabled: Mapped[bool] = mapped_column(default=True, server_default=text("1"))
+    enabled: Mapped[bool] = mapped_column(default=True, server_default=text("true"))
     last_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_status: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow,
