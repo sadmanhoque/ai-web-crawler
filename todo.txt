@@ -6,3 +6,10 @@ Some sort of off site backup strategy for postgresql and qdrantDB? I suppose the
 quite as important, but the whole of postgresql definitely needs a backup since it stores user and 
 partner info. So far everything is designed to be in k8s, so it can't be just another namespace or
 whatever, well it can, but ideally it should live out of the k8s cluster.
+
+In the deployment.md file one of the commands for local deployment testing is:
+    kubectl create secret generic qdrant-secret \
+        --namespace localmind --from-literal=api-key=local-testing-key
+    Note that there seems to be a very literal plain text API key being used here. For
+    production deployment I need to check if that value needs to be replaced somehow
+    or I'm just missing something.
