@@ -235,9 +235,8 @@ kubectl -n localmind get secret localmind-pg-app      # CNPG auto-created; serve
 ```bash
 kubectl apply -f $M/crawler-db.yaml          # DatabaseRole + Database
 # poll ~15s — the operator reconciles; both must be Reconciled:
-kubectl -n localmind get databaseroles databases
-#   localmind-crawler-role   localmind_crawler   Reconciled
-#   localmind-crawler-db     localmind_crawler   localmind_crawler   Reconciled
+kubectl -n localmind get databaseroles       # → localmind-crawler-role ... Reconciled
+kubectl -n localmind get databases           # → localmind-crawler-db ... Reconciled
 ```
 This is the mechanism that replaces the old `pg-crawler.yaml` Job. The operator
 creates role + db `localmind_crawler` and syncs its password to
@@ -325,7 +324,8 @@ anything from this repo; if one is red, finish PHASE 0 first.
 
 ```bash
 kubectl -n localmind get cluster localmind-pg                     # Ready
-kubectl -n localmind get databaseroles databases                  # both Reconciled
+kubectl -n localmind get databaseroles                            # localmind-crawler-role Reconciled
+kubectl -n localmind get databases                                # localmind-crawler-db Reconciled
 kubectl -n localmind get secret localmind-crawler-pg localmind-crawler-cred localmind-secrets
 kubectl -n localmind get svc qdrant
 # crawler PG password invariance (Section 3):
@@ -461,7 +461,8 @@ Run this once, top to bottom, to confirm the whole system is up:
 
 ```bash
 kubectl -n localmind get cluster localmind-pg        # Ready
-kubectl -n localmind get databaseroles databases     # both Reconciled
+kubectl -n localmind get databaseroles               # Reconciled
+kubectl -n localmind get databases                   # Reconciled
 kubectl -n localmind get pods -l 'app.kubernetes.io/name=qdrant' -o jsonpath='{.items[*].status.phase}'
 kubectl -n localmind get pods                        # all Running/Ready (no CrashLoop/Pending)
 curl -s localhost:8080/healthz                       # server
@@ -589,7 +590,7 @@ Enabling an internal redirect here creates a loop against the ALB.
 **C-1 Crawler pod CrashLoop: `password authentication failed for user
 "localmind_crawler"`.** The role/db are missing (fresh cluster where
 `crawler-db.yaml` was never applied / cluster recreated) **or** the two
-credential secrets disagree (C-3). Check `get databaseroles databases`; apply
+credential secrets disagree (C-3). Check `get databaseroles` and `get databases`; apply
 `crawler-db.yaml` if not Reconciled; compare the two secret passwords.
 
 **C-2 `CreateContainerConfigError: secret "localmind-crawler-secret" not found`
