@@ -13,3 +13,9 @@ In the deployment.md file one of the commands for local deployment testing is:
     Note that there seems to be a very literal plain text API key being used here. For
     production deployment I need to check if that value needs to be replaced somehow
     or I'm just missing something.
+
+When doing local deployment, the step about testing out the process of indexing a list of html
+    pages and loading it onto qdrant involved installing a bunch of python modules manually.
+    This could be just due to doing a local testing where the seed_test_user.py script was
+    run, but check if this becomes a problem for prod deployment. Should be easy to resolve
+    with a requirements.txt file or something.
