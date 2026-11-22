@@ -10,9 +10,9 @@ sites:
     run_hour_utc: 19
     run_minute_utc: 0
   - domain: en.wikipedia.org
-    start_url: https://en.wikipedia.org/wiki/Main_Page
+    start_url: https://en.wikipedia.org/wiki/
     profile: encyclopedia
-    max_pages: 2000
+    max_pages: 2
     path_rules:
       - {prefix: /wiki/Special, depth: headline}
     run_hour_utc: 15
