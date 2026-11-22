@@ -6,7 +6,7 @@ stack — in the **correct sequential order**.
 
 This doc **supersedes** the two split references:
 - the old crawler-only `ai-web-crawler/deployment.md` (now consolidated here), and
-- `ai-web-search/dev-env/ai-gen-deployment-steps` (server-only; banner added).
+- `ai-web-search/dev-env/ai-gen-deployment-steps` (server-only — deleted; its content is consolidated here).
 
 Everything runs in **one namespace: `localmind`** (a deliberate decision — see
 Section 0). The deploy is **four phases**; do them in order and do not skip the

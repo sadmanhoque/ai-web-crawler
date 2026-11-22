@@ -7,5 +7,5 @@ requests
 beautifulsoup4
 pydantic>=2
 pyyaml
-playwright
+playwright==1.49.0
 anthropic
