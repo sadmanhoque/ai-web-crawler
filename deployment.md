@@ -266,8 +266,8 @@ Still in `~/git/ai-web-search/dev-env`.
 ### 5.1 Build the server images (into minikube)
 
 ```bash
-minikube image build -f Dockerfile.backend  -t your-registry/localmind-backend:latest  .
-minikube image build -f Dockerfile.frontend -t your-registry/localmind-frontend:latest .
+minikube image build -f Dockerfile.backend  -t registry.example.com/localmind-backend:latest  .
+minikube image build -f Dockerfile.frontend -t registry.example.com/localmind-frontend:latest .
 minikube image ls | grep localmind          # both present (Gotcha S-3: don't trust a piped exit code)
 ```
 `Dockerfile.backend` installs **CPU-only torch first** — do not "simplify" it
