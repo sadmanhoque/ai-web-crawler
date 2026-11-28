@@ -26,3 +26,11 @@ Frontend UI/UX needs a total overhaul, it's very generic right now and some thin
     really big and I start adding other services like mail, image search, etc. There's a chat one
     Gemini I should refer to first for stylistic ideas and what not, but also need to make a
     wireframe of the basic layout.
+
+Search result performance needs to be more optimized. Currently there's a small LLM running in the
+    background that ranks top 50 search results from Bing and the indexed pages from partner sites
+    to generate a result. This is workable but very basic. Instead of doing a re-ranking it should
+    function more like an agent that tries to understand, semantically, what user is looking for
+    and then rank the search results based on that. One caveat is this might already be happening.
+    More testing and investigation is required for this, that's what sets this project apart from
+    google.
