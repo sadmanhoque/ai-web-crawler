@@ -19,3 +19,10 @@ When doing local deployment, the step about testing out the process of indexing 
     This could be just due to doing a local testing where the seed_test_user.py script was
     run, but check if this becomes a problem for prod deployment. Should be easy to resolve
     with a requirements.txt file or something.
+
+Frontend UI/UX needs a total overhaul, it's very generic right now and some things make no sense.
+    The subscription option should be front and centre for new users, not in another page. And
+    the search page has a bar that shows the partners, that won't make sense as the number gets
+    really big and I start adding other services like mail, image search, etc. There's a chat one
+    Gemini I should refer to first for stylistic ideas and what not, but also need to make a
+    wireframe of the basic layout.
