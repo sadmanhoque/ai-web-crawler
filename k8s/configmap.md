@@ -15,14 +15,15 @@ kubectl create configmap localmind-crawler-config \
 # set).
 #   admin-token     Bearer token for the crawler's /hits + /admin/* API
 #                   (empty = auth disabled — dev only)
-#   anthropic-key   LLM key for page summaries, crawler/summarize.py
-#                   (empty = summaries disabled)
 #   cse-api-key / cse-cx / bing-api-key
 #                   web-search leg (search/web.py); empty = /web returns 400
+# Note: page summaries (crawler/summarize.py) use a LOCAL Ollama model
+# (OLLAMA_URL / SUMMARY_MODEL envs in k8s/crawler.yaml) — open-weight only,
+# no key needed. The former anthropic-key entry is obsolete (harmless to
+# leave in an already-created Secret).
 kubectl create secret generic localmind-crawler-secret \
   --namespace localmind \
   --from-literal=admin-token=CHANGEME \
-  --from-literal=anthropic-key= \
   --from-literal=cse-api-key= \
   --from-literal=cse-cx= \
   --from-literal=bing-api-key=

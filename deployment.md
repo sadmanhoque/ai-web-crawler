@@ -132,7 +132,7 @@ disjoint names. This is the rule that keeps the two-repo split safe.
 | `localmind-frontend-ingress` / `localmind-backend-ingress` | ai-web-search | `ingress.yaml` | `/*` and `/api/*` |
 | `localmind-crawler-rbac` Role/RoleBinding/SA (optional) | ai-web-search | `crawler-rbac.yaml` | only if deploy identity ≠ cluster-admin |
 | `localmind-crawler-config` ConfigMap | ai-web-crawler | `k8s/configmap.md` | profiles/sites/tiers |
-| `localmind-crawler-secret` Secret | ai-web-crawler | `k8s/configmap.md` | admin-token, anthropic, cse/bing |
+| `localmind-crawler-secret` Secret | ai-web-crawler | `k8s/configmap.md` | admin-token, cse/bing |
 | `redis` Deployment+Service | ai-web-crawler | `k8s/redis.yaml` | message bus (dev-grade) |
 | `localmind-crawler` Deployment+Service+HPA | ai-web-crawler | `k8s/crawler.yaml` | API + workers |
 | `localmind-indexer` Deployment (+KEDA) | ai-web-crawler | `k8s/indexer.yaml`, `k8s/indexer-keda.yaml` | embed + upsert |
@@ -155,7 +155,7 @@ frontend/backend setup (Gotcha S-1).
 | `localmind-pg-app` | `user`,`password`,`dbname`,`host`,`port`,`uri` | **CNPG auto** after cluster Ready | CNPG-generated; server DB owner `localmind_app` |
 | `localmind-crawler-pg` | `user`,`password`,`dbname`,`host`,`port`,`database-url` | PHASE 0, `secrets.dev.yaml` | **one** password, used by crawler pods (`DATABASE_URL`) |
 | `localmind-crawler-cred` | `username`,`password` (basic-auth) | PHASE 0, `secrets.dev.yaml` | **must equal** `localmind-crawler-pg.password`; the operator syncs the PG role to it (`cnpg.io/reload: "true"`) |
-| `localmind-crawler-secret` | `admin-token`,`anthropic-key`,`cse-api-key`,`cse-cx`,`bing-api-key` | PHASE 2, `k8s/configmap.md` | tokens; empty = feature off |
+| `localmind-crawler-secret` | `admin-token`,`cse-api-key`,`cse-cx`,`bing-api-key` | PHASE 2, `k8s/configmap.md` | tokens; empty = feature off |
 
 **The one-password invariant** (Gotchas C-1/C-3): `localmind-crawler-pg.password`
 **and** `localmind-crawler-cred.password` must be the **same value** — the
@@ -348,7 +348,6 @@ kubectl create configmap localmind-crawler-config --namespace localmind \
 # empty token values are valid and mean "feature off":
 kubectl create secret generic localmind-crawler-secret --namespace localmind \
   --from-literal=admin-token=CHANGEME \
-  --from-literal=anthropic-key= \
   --from-literal=cse-api-key= \
   --from-literal=cse-cx= \
   --from-literal=bing-api-key= \

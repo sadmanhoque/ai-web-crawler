@@ -34,8 +34,11 @@ spec:
             # which owns a different key set in this same namespace.
             - name: ADMIN_TOKEN
               valueFrom: {secretKeyRef: {name: localmind-crawler-secret, key: admin-token}}
-            - name: ANTHROPIC_API_KEY
-              valueFrom: {secretKeyRef: {name: localmind-crawler-secret, key: anthropic-key}}
+            # Page summaries (crawler/summarize.py) — open-weight only: a local
+            # Ollama model on the minikube host, no API key. If Ollama is down
+            # the crawler falls back to an extractive summary (never fails).
+            - {name: OLLAMA_URL, value: "http://host.minikube.internal:11434"}
+            - {name: SUMMARY_MODEL, value: "llama3.2:3b"}
           readinessProbe: {httpGet: {path: /healthz, port: 8000}}
           livenessProbe: {httpGet: {path: /healthz, port: 8000}, initialDelaySeconds: 20}
           resources:
